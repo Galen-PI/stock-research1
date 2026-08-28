@@ -22,6 +22,8 @@ COMPANIES = [
     {"ticker": "AAPL", "cik": "0000320193", "security_id": "aaa41665-352a-4bce-83a0-b3a119a8c522"},
     {"ticker": "PFE", "cik": "0000078003", "security_id": "ea4ae84e-a0af-4050-b478-4b9bedbe9ca3"},
     {"ticker": "NVDA", "cik": "0001045810", "security_id": "97f01831-c930-4f24-932d-f108c9d9920d"},
+    {"ticker": "AMD", "cik": "0000002488", "security_id": "3f29f0df-b0dc-4835-a178-51b2f2f77b8b"},
+    {"ticker": "JPM", "cik": "0000019617", "security_id": "18e6571e-4e2a-4a99-b1cc-da272fcdd804"},
 ]
 
 

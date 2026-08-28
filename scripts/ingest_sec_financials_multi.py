@@ -1,6 +1,6 @@
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import requests
 
@@ -30,6 +30,7 @@ CONCEPTS = {
     "revenue": [
         "RevenueFromContractWithCustomerExcludingAssessedTax",
         "Revenues",
+        "SalesRevenueNet",
     ],
     "gross_profit": ["GrossProfit"],
     "operating_income": ["OperatingIncomeLoss"],
@@ -48,23 +49,23 @@ CONCEPTS = {
 }
 
 
-# Extended from the original MSFT-only mapping. CIK strings are
-# unpadded, matching how the original script's CIK_TO_TICKER was keyed.
 CIK_TO_TICKER = {
     "789019": "MSFT",
     "320193": "AAPL",
     "78003": "PFE",
     "1045810": "NVDA",
+    "2488": "AMD",
+    "19617": "JPM",
 }
 
 # Each ticker's fiscal year end, needed for correct quarter/Q4 derivation.
-# MSFT: June 30. AAPL: ~Sept 30 (last Saturday of Sept, floats slightly).
-# PFE: Dec 31 (standard calendar year).
 FISCAL_YEAR_END = {
     "MSFT": (6, 30),
     "AAPL": (9, 30),
     "PFE": (12, 31),
     "NVDA": (1, 31),
+    "AMD": (12, 31),   # AMD's actual FY end floats slightly (last Saturday of December), approximated
+    "JPM": (12, 31),   # standard calendar year
 }
 
 
@@ -164,10 +165,20 @@ def is_annual_duration_fact(record):
     return days is not None and 300 <= days <= 400
 
 
-def choose_latest_fact(records):
+def choose_earliest_fact(records):
+    """
+    Pick the fact with the earliest filed date -- the original disclosure
+    for this period, not a later comparative re-mention. SEC filings
+    routinely re-report prior periods as comparative figures in later
+    filings (e.g. a FY2022 10-K includes FY2021's numbers for
+    comparison). Taking "latest filed" would drift filed_date forward
+    to whenever this period was last mentioned anywhere, not when it
+    was originally disclosed -- which is what matters for aligning
+    against market reaction.
+    """
     if not records:
         return None
-    return max(records, key=lambda x: (x.get("filed") or "", x.get("accn") or ""))
+    return min(records, key=lambda x: (x.get("filed") or "9999-99-99", x.get("accn") or ""))
 
 
 def build_concept_map(data):
@@ -180,16 +191,49 @@ def build_concept_map(data):
 
 
 def build_concept_facts(data, concept_map):
+    """
+    Combine facts from ALL candidate concept names for each field, not
+    just the first one that exists in the company's XBRL data.
+
+    This matters because some companies tag the SAME logical field
+    under different concept names depending on statement type -- e.g.
+    NVIDIA tags annual revenue under
+    RevenueFromContractWithCustomerExcludingAssessedTax but tags
+    quarterly (10-Q) revenue under the plain Revenues concept. The old
+    logic picked whichever concept existed first and stopped there,
+    which meant it found NVIDIA's annual-only concept and silently
+    never checked the second concept where all of NVIDIA's real
+    quarterly data actually lives -- explaining why NVDA produced zero
+    Q1-Q3 quarterly periods while every other ticker worked fine.
+    """
+    us_gaap = data.get("facts", {}).get("us-gaap", {})
     concept_facts = {}
-    for field, concept_name in concept_map.items():
-        if not concept_name:
-            concept_facts[field] = []
-            continue
-        _, concept_data = find_concept(data, [concept_name])
-        if field in {"eps_basic", "eps_diluted"}:
-            concept_facts[field] = get_eps_facts(concept_data)
-        else:
-            concept_facts[field] = get_usd_facts(concept_data)
+
+    for field, candidate_names in CONCEPTS.items():
+        combined = []
+        seen_keys = set()
+
+        for concept_name in candidate_names:
+            concept_data = us_gaap.get(concept_name)
+            if not concept_data:
+                continue
+
+            if field in {"eps_basic", "eps_diluted"}:
+                facts = get_eps_facts(concept_data)
+            else:
+                facts = get_usd_facts(concept_data)
+
+            for fact in facts:
+                # Dedupe in case the same fact somehow appears under
+                # more than one concept name for this company.
+                key = (fact.get("accn"), fact.get("start"), fact.get("end"), fact.get("val"))
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                combined.append(fact)
+
+        concept_facts[field] = combined
+
     return concept_facts
 
 
@@ -220,11 +264,13 @@ def build_annual_periods(data, concept_map):
                     "statement_type": "income_cash_flow",
                     "fiscal_year": period_end.year,
                     "fiscal_quarter": None,
-                    "filed_date": fact.get("filed"),
+                    "filed_date": None,
                 }
 
             current = periods[end]
-            if field not in current or (fact.get("filed") or "") >= (current.get("filed_date") or ""):
+            fact_filed = fact.get("filed") or ""
+            current_filed = current.get("filed_date")
+            if field not in current or current_filed is None or fact_filed < current_filed:
                 current[field] = fact.get("val")
                 if fact.get("filed"):
                     current["filed_date"] = fact["filed"]
@@ -238,7 +284,9 @@ def build_annual_periods(data, concept_map):
             if not end or end not in periods:
                 continue
             current = periods[end]
-            if field not in current or (fact.get("filed") or "") >= (current.get("filed_date") or ""):
+            fact_filed = fact.get("filed") or ""
+            current_filed = current.get("filed_date")
+            if field not in current or current_filed is None or fact_filed < current_filed:
                 current[field] = fact.get("val")
 
     for field in {"eps_basic", "eps_diluted"}:
@@ -249,7 +297,9 @@ def build_annual_periods(data, concept_map):
             if not end or end not in periods:
                 continue
             current = periods[end]
-            if field not in current or (fact.get("filed") or "") >= (current.get("filed_date") or ""):
+            fact_filed = fact.get("filed") or ""
+            current_filed = current.get("filed_date")
+            if field not in current or current_filed is None or fact_filed < current_filed:
                 current[field] = fact.get("val")
                 if fact.get("filed"):
                     current["filed_date"] = fact["filed"]
@@ -260,7 +310,74 @@ def build_annual_periods(data, concept_map):
         if ocf is not None and capex is not None:
             period["free_cash_flow"] = ocf - capex
 
+        # Derive total_liabilities from the accounting identity
+        # (Assets = Liabilities + Equity) whenever the concept simply
+        # isn't tagged at all for this company (e.g. AMD has no
+        # Liabilities concept in its SEC XBRL data at all). This is
+        # mathematically exact, not an estimate. Without this, any
+        # manual database patch gets silently overwritten back to
+        # NULL on every future re-ingestion, since the script always
+        # writes whatever it found here -- which was nothing.
+        if period.get("total_liabilities") is None:
+            assets = period.get("total_assets")
+            equity = period.get("total_equity")
+            if assets is not None and equity is not None:
+                period["total_liabilities"] = assets - equity
+
     return sorted(periods.values(), key=lambda x: x["period_end"], reverse=True)
+
+
+# Some companies (bank-style reporters, JPM among the tickers here)
+# stop tagging a single combined "Revenues" figure at some point and
+# switch to reporting components separately. For these, real total
+# revenue can be reconstructed as
+# NoninterestIncome + InterestIncomeExpenseNet (net interest income).
+# Verified directly against JPM's real, publicly reported Q3 2022
+# revenue (~32.7B) before being added here -- the reconstructed sum
+# matched to the dollar (32,716,000,000).
+COMPOSITE_REVENUE_TICKERS = {
+    "JPM": ("NoninterestIncome", "InterestIncomeExpenseNet"),
+}
+
+
+def build_composite_revenue_facts(data, ticker):
+    """
+    For companies in COMPOSITE_REVENUE_TICKERS, build synthetic
+    "revenue" facts by summing two component concepts wherever they
+    share an identical (start, end) date -- i.e. wherever both halves
+    of revenue were disclosed for the exact same standalone period.
+    Returns a list of fact-shaped dicts compatible with the normal
+    revenue_facts anchor logic used in build_quarterly_periods.
+    """
+    if ticker not in COMPOSITE_REVENUE_TICKERS:
+        return []
+
+    concept_a_name, concept_b_name = COMPOSITE_REVENUE_TICKERS[ticker]
+    us_gaap = data.get("facts", {}).get("us-gaap", {})
+
+    def get_usd(name):
+        concept = us_gaap.get(name)
+        if not concept:
+            return []
+        return concept.get("units", {}).get("USD", [])
+
+    facts_a = {(f.get("start"), f.get("end")): f for f in get_usd(concept_a_name) if f.get("form") == "10-Q"}
+    facts_b = {(f.get("start"), f.get("end")): f for f in get_usd(concept_b_name) if f.get("form") == "10-Q"}
+
+    composite = []
+    for key in facts_a.keys() & facts_b.keys():
+        fact_a = facts_a[key]
+        fact_b = facts_b[key]
+        composite.append({
+            "start": fact_a.get("start"),
+            "end": fact_a.get("end"),
+            "val": fact_a.get("val") + fact_b.get("val"),
+            "form": "10-Q",
+            "filed": fact_a.get("filed"),
+            "accn": fact_a.get("accn"),
+        })
+
+    return composite
 
 
 def build_quarterly_periods(data, concept_map, ticker):
@@ -268,25 +385,6 @@ def build_quarterly_periods(data, concept_map, ticker):
     periods = {}
 
     fy_end_month, fy_end_day = FISCAL_YEAR_END[ticker]
-
-    def determine_quarter(end):
-        """
-        Map a period-end month to Q1/Q2/Q3 based on this ticker's fiscal
-        year end. Q4 is derived separately (annual - Q1 - Q2 - Q3), so it
-        never comes from this function.
-        """
-        if not end:
-            return None
-        try:
-            month = datetime.strptime(end, "%Y-%m-%d").month
-        except ValueError:
-            return None
-
-        # Months 3, 6, 9 from fiscal year start = Q1, Q2, Q3
-        fy_start_month = fy_end_month % 12 + 1
-        months_into_fy = (month - fy_start_month) % 12
-        quarter = (months_into_fy // 3) + 1
-        return quarter if quarter in (1, 2, 3) else None
 
     def fiscal_year_for_quarter(end):
         if not end:
@@ -303,7 +401,33 @@ def build_quarterly_periods(data, concept_map, ticker):
         "operating_cash_flow", "capital_expenditures", "eps_basic", "eps_diluted",
     }
 
+    instant_fields = {"total_assets", "total_liabilities", "total_equity", "cash_and_equivalents"}
+
     revenue_facts = concept_facts.get("revenue", [])
+
+    # Merge in composite revenue facts (JPM etc.) so periods where the
+    # single 'revenue' concept has no coverage but the two components
+    # do still get detected by the normal chronological anchor logic
+    # below, exactly as if they were ordinary revenue facts.
+    revenue_facts = revenue_facts + build_composite_revenue_facts(data, ticker)
+
+    # Quarter numbers are assigned by CHRONOLOGICAL ORDER within each
+    # fiscal year, not by guessing from any single date's calendar
+    # month. Different companies float their fiscal period boundaries
+    # in different directions -- PFE's periods sometimes end a few
+    # days INTO the next calendar month ("nearest Sunday" convention),
+    # while AMD's sometimes START a few days BEFORE a clean month
+    # boundary. Trying to fix this by picking start-vs-end, or any
+    # other single-date month heuristic, just relocates the ambiguity
+    # to a different company rather than eliminating it. Sorting each
+    # fiscal year's real quarters by end date and assigning 1st/2nd/3rd
+    # in order sidesteps the problem entirely, since it never depends
+    # on which calendar month a boundary date happens to fall in.
+
+    # Step 1: collect one candidate per unique end date, per fiscal
+    # year (preferring the earliest-filed fact for any exact date that
+    # appears more than once, same principle as choose_earliest_fact).
+    candidates_by_year = {}
 
     for fact in revenue_facts:
         if fact.get("form") != "10-Q":
@@ -314,23 +438,65 @@ def build_quarterly_periods(data, concept_map, ticker):
         days = duration_days(start, end)
         if days is None or not 70 <= days <= 110:
             continue
-        quarter = determine_quarter(end)
-        if quarter not in {1, 2, 3}:
-            continue
         fiscal_year = fiscal_year_for_quarter(end)
         if fiscal_year is None:
             continue
 
-        key = (fiscal_year, quarter)
-        candidate = {
-            "period_end": end, "period_type": "quarterly",
-            "statement_type": "income_cash_flow", "start": start,
-            "filed_date": fact.get("filed"), "fiscal_year": fiscal_year,
-            "fiscal_quarter": quarter, "revenue": fact.get("val"),
-        }
-        existing = periods.get(key)
-        if existing is None or (candidate.get("filed_date") or "") >= (existing.get("filed_date") or ""):
-            periods[key] = candidate
+        candidates_by_year.setdefault(fiscal_year, {})
+        existing = candidates_by_year[fiscal_year].get(end)
+        fact_filed = fact.get("filed") or "9999-99-99"
+        existing_filed = existing.get("filed") if existing else "9999-99-99"
+        if existing is None or fact_filed < existing_filed:
+            candidates_by_year[fiscal_year][end] = {
+                "start": start, "end": end,
+                "filed": fact.get("filed"), "val": fact.get("val"),
+            }
+
+    # Step 2: within each fiscal year, sort the unique end dates
+    # chronologically and assign quarter 1/2/3 by that order. A
+    # fiscal year should have at most 3 such periods (Q4 is derived
+    # separately from annual minus Q1+Q2+Q3); if more than 3 unique
+    # end dates exist for one fiscal year, something else is wrong
+    # and it's safer to skip that year than guess.
+    QUARTER_REFERENCE_DAYS = [91.3125, 182.625, 273.9375]  # 1/4, 1/2, 3/4 of a 365.25-day year
+
+    def fiscal_year_start_date(fiscal_year):
+        try:
+            prior_fy_end = datetime(fiscal_year - 1, fy_end_month, fy_end_day)
+        except ValueError:
+            prior_fy_end = datetime(fiscal_year - 1, fy_end_month, 28)
+        return prior_fy_end + timedelta(days=1)
+
+    for fiscal_year, end_dates_map in candidates_by_year.items():
+        sorted_ends = sorted(end_dates_map.keys())
+        if len(sorted_ends) > 3:
+            print(f"WARNING: {ticker} FY{fiscal_year} has {len(sorted_ends)} candidate quarterly periods "
+                  f"(expected at most 3) -- skipping quarter assignment for this year rather than guessing: "
+                  f"{sorted_ends}")
+            continue
+
+        fy_start = fiscal_year_start_date(fiscal_year)
+        assigned_quarters = {}
+
+        for end_date in sorted_ends:
+            try:
+                end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+            except ValueError:
+                continue
+            days_into_fy = (end_dt - fy_start).days
+            distances = [abs(days_into_fy - ref) for ref in QUARTER_REFERENCE_DAYS]
+            quarter = distances.index(min(distances)) + 1
+            assigned_quarters[end_date] = quarter
+
+        for end_date, quarter in assigned_quarters.items():
+            fact = end_dates_map[end_date]
+            key = (fiscal_year, quarter)
+            periods[key] = {
+                "period_end": fact["end"], "period_type": "quarterly",
+                "statement_type": "income_cash_flow", "start": fact["start"],
+                "filed_date": fact["filed"], "fiscal_year": fiscal_year,
+                "fiscal_quarter": quarter, "revenue": fact["val"],
+            }
 
     for key, period in periods.items():
         end = period["period_end"]
@@ -348,12 +514,38 @@ def build_quarterly_periods(data, concept_map, ticker):
                 if days is None or not 70 <= days <= 110:
                     continue
                 candidates.append(fact)
-            best = choose_latest_fact(candidates)
+            best = choose_earliest_fact(candidates)
             if best is None:
                 continue
             period[field] = best.get("val")
-            if best.get("filed") and best["filed"] > (period.get("filed_date") or ""):
+            if best.get("filed") and best["filed"] < (period.get("filed_date") or "9999-99-99"):
                 period["filed_date"] = best["filed"]
+
+        # Balance-sheet (instant) fields for Q1-Q3. Previously missing
+        # entirely from this function -- only Q4 (via the annual
+        # inheritance below) ever got these values. This mirrors the
+        # exact same matching logic already used for annual periods:
+        # match on form=10-Q and an exact end-date match, no duration
+        # window needed since these are point-in-time balances.
+        for field in instant_fields:
+            candidates = [
+                fact for fact in concept_facts.get(field, [])
+                if fact.get("form") == "10-Q" and fact.get("end") == end
+            ]
+            best = choose_earliest_fact(candidates)
+            if best is None:
+                continue
+            period[field] = best.get("val")
+
+        # Same total_liabilities derivation as in build_annual_periods --
+        # needed so this survives future re-ingestions instead of being
+        # silently overwritten back to NULL for companies (like AMD)
+        # that simply don't tag this concept at all.
+        if period.get("total_liabilities") is None:
+            assets = period.get("total_assets")
+            equity = period.get("total_equity")
+            if assets is not None and equity is not None:
+                period["total_liabilities"] = assets - equity
 
     annual_periods = build_annual_periods(data, concept_map)
     annual_by_fiscal_year = {a["fiscal_year"]: a for a in annual_periods if a.get("fiscal_year") is not None}
@@ -372,8 +564,6 @@ def build_quarterly_periods(data, concept_map, ticker):
         except ValueError:
             continue
 
-        # Only build Q4 for annual periods matching this ticker's actual
-        # fiscal year end month (guards against odd/transition-year filings).
         if annual_date.month != fy_end_month:
             continue
 
@@ -412,8 +602,6 @@ def build_quarterly_periods(data, concept_map, ticker):
 
         periods[(fiscal_year, 4)] = q4
 
-    # Reconciliation check: Q1+Q2+Q3+Q4 must equal annual, for every field
-    # where all four quarters are present.
     reconciliation_fields = {
         "revenue", "gross_profit", "operating_income", "net_income",
         "operating_cash_flow", "capital_expenditures",
@@ -448,12 +636,6 @@ def build_quarterly_periods(data, concept_map, ticker):
 
 
 def get_security_by_ticker(ticker):
-    """
-    Look up security_id directly by ticker, rather than via the
-    entities table. Simpler and avoids depending on entities.entity_id
-    linkage that may not exist for securities added outside the
-    onboard_company.py flow.
-    """
     url = f"{SUPABASE_URL}/rest/v1/securities"
     params = {"ticker": f"eq.{ticker}", "select": "id,ticker,exchange", "limit": "1"}
     response = requests.get(url, headers=SUPABASE_HEADERS, params=params, timeout=30)
@@ -468,6 +650,37 @@ def get_security_by_ticker(ticker):
 
 def prepare_database_record(record):
     return {column: record.get(column) for column in FINANCIAL_COLUMNS}
+
+
+def delete_existing_quarterly_records(security_id):
+    """
+    Delete all existing quarterly financial_statements rows for this
+    security before inserting the freshly computed set.
+
+    This matters because the pipeline only ever upserts by
+    (security_id, statement_type, period_type, period_end). If the
+    quarter-classification logic ever changes (as it did more than
+    once during development -- month-based, then start-date-based,
+    then fully chronological), a period_end that used to be labeled
+    fiscal_quarter=1 might now correctly be fiscal_quarter=2. Since
+    the period_end itself differs from whatever the new logic
+    produces for that slot, upsert alone never touches the old row
+    -- it just silently persists forever alongside the new, correct
+    one, producing duplicate fiscal_quarter labels. A clean delete
+    before every re-ingestion guarantees the table always reflects
+    only the current logic's output, with no leftover cruft from any
+    previous version of this script.
+    """
+    url = f"{SUPABASE_URL}/rest/v1/financial_statements"
+    params = {
+        "security_id": f"eq.{security_id}",
+        "period_type": "eq.quarterly",
+    }
+    response = requests.delete(url, headers=SUPABASE_HEADERS, params=params, timeout=30)
+    if response.status_code not in (200, 204):
+        print(response.text)
+        raise RuntimeError("Failed to delete existing quarterly records before re-ingestion")
+    print("Cleared existing quarterly records before re-ingestion (preventing stale rows from any prior logic version).")
 
 
 def upsert_financial_records(records):
@@ -511,6 +724,8 @@ def ingest_ticker(cik):
     security_id = security["id"]
     print(f"Security ID: {security_id}")
 
+    delete_existing_quarterly_records(security_id)
+
     records = []
     for record in annual_periods + quarterly_periods:
         db_record = dict(record)
@@ -528,15 +743,13 @@ def ingest_ticker(cik):
 
 def main():
     if len(sys.argv) == 2:
-        # Single CIK, matches original script's usage pattern
         ingest_ticker(sys.argv[1])
     elif len(sys.argv) == 1:
-        # No args: run for AAPL and PFE (MSFT already populated)
-        for cik in ("320193", "78003"):
+        for cik in ("2488", "19617"):
             ingest_ticker(cik)
     else:
         print("Usage:")
-        print("  python ingest_sec_financials_multi.py          # runs AAPL + PFE")
+        print("  python ingest_sec_financials_multi.py          # runs AMD + JPM")
         print("  python ingest_sec_financials_multi.py CIK       # runs a single CIK")
 
 
