@@ -1,3 +1,4 @@
+
 import os
 import sys
 from datetime import datetime
@@ -30,46 +31,63 @@ CONCEPTS = {
     "revenue": [
         "RevenueFromContractWithCustomerExcludingAssessedTax",
         "Revenues",
+        "SalesRevenueNet",
     ],
-    "gross_profit": [
-        "GrossProfit",
+
+    "cost_of_goods_sold": [
+        "CostOfGoodsAndServicesSold",
+        "CostOfGoodsSold",
     ],
+
     "operating_income": [
         "OperatingIncomeLoss",
     ],
+
     "net_income": [
         "NetIncomeLoss",
+        "ProfitLoss",
     ],
+
     "eps_basic": [
         "EarningsPerShareBasic",
     ],
+
     "eps_diluted": [
         "EarningsPerShareDiluted",
     ],
+
     "total_assets": [
         "Assets",
     ],
+
     "total_liabilities": [
         "Liabilities",
     ],
+
     "total_equity": [
         "StockholdersEquity",
-        "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest",
     ],
+
     "cash_and_equivalents": [
         "CashAndCashEquivalentsAtCarryingValue",
     ],
+
     "operating_cash_flow": [
         "NetCashProvidedByUsedInOperatingActivities",
     ],
+
     "capital_expenditures": [
         "PaymentsToAcquirePropertyPlantAndEquipment",
+        "PaymentsToAcquireProductiveAssets",
     ],
 }
 
 
 CIK_TO_TICKER = {
     "789019": "MSFT",
+    "320193": "AAPL",
+    "78003": "PFE",
+    "1045810": "NVDA",
 }
 
 
@@ -164,6 +182,23 @@ def normalize_fiscal_quarter(value):
 
     return None
 
+def get_sec_fiscal_quarter(record):
+    """
+    Determine fiscal quarter using SEC filing metadata.
+
+    SEC's `fp` field identifies Q1/Q2/Q3/FY for the
+    filing. We only use Q1-Q3 here because Q4 is
+    calculated from the annual filing minus Q1-Q3.
+    """
+
+    fp = record.get("fp")
+
+    quarter = normalize_fiscal_quarter(fp)
+
+    if quarter in (1, 2, 3):
+        return quarter
+
+    return None
 
 def get_sec_company_facts(cik):
     cik_padded = str(cik).zfill(10)
@@ -283,6 +318,46 @@ def build_concept_map(data):
             concept_map[field] = None
 
     return concept_map
+
+
+def get_concept_data(data, concept_name):
+    """Return one US-GAAP concept definition from SEC Company Facts."""
+    if not data or not concept_name:
+        return None
+
+    return (
+        data.get("facts", {})
+        .get("us-gaap", {})
+        .get(concept_name)
+    )
+
+
+def get_fact_records_for_concepts(data, concept_names, unit=None):
+    """Return SEC XBRL fact records for one or more concept names.
+
+    This helper accepts either a single concept name or a list/tuple.
+    If *unit* is provided, only records from that XBRL unit are returned.
+    """
+    if not data or not concept_names:
+        return []
+
+    if isinstance(concept_names, str):
+        concept_names = [concept_names]
+
+    records = []
+    for concept_name in concept_names:
+        concept_data = get_concept_data(data, concept_name)
+        if not concept_data:
+            continue
+
+        units = concept_data.get("units", {})
+        if unit is not None:
+            records.extend(units.get(unit, []))
+        else:
+            for unit_records in units.values():
+                records.extend(unit_records)
+
+    return records
 
 
 def build_concept_facts(data, concept_map):
@@ -606,16 +681,638 @@ def build_quarterly_periods(data, concept_map):
     periods = {}
 
     # ---------------------------------------------------------
-    # Microsoft fiscal calendar:
+    # Q1-Q3
     #
-    # Q1 = September 30
-    # Q2 = December 31
-    # Q3 = March 31
-    # Q4 = June 30
+    # We use the SEC's own fiscal-period metadata (`fp` and
+    # `fy`) rather than assuming a calendar such as Microsoft's.
     #
-    # We determine the quarter from the period-end date rather
-    # than relying on SEC's "fp" field.
+    # We specifically select standalone quarterly facts.
+    #
+    # Example:
+    #
+    # Q2 YTD:
+    #   2022-01-01 -> 2022-07-03
+    #
+    # Q2 standalone:
+    #   2022-04-04 -> 2022-07-03
+    #
+    # The standalone fact is what we want.
     # ---------------------------------------------------------
+
+    duration_fields = {
+        "revenue",
+        "cost_of_goods_sold",
+        "gross_profit",
+        "operating_income",
+        "net_income",
+        "operating_cash_flow",
+        "capital_expenditures",
+        "eps_basic",
+        "eps_diluted",
+    }
+
+    def is_standalone_quarter(record):
+        start = record.get("start")
+        end = record.get("end")
+
+        if not start or not end:
+            return False
+
+        days = duration_days(
+            start,
+            end,
+        )
+
+        if days is None:
+            return False
+
+        return 70 <= days <= 110
+
+    # ---------------------------------------------------------
+    # Use revenue as the anchor for identifying quarters.
+    # ---------------------------------------------------------
+
+    revenue_facts = concept_facts.get(
+        "revenue",
+        [],
+    )
+
+    for fact in revenue_facts:
+        if fact.get("form") != "10-Q":
+            continue
+
+        quarter = get_sec_fiscal_quarter(
+            fact
+        )
+
+        if quarter not in {1, 2, 3}:
+            continue
+
+        fiscal_year = safe_int(
+            fact.get("fy")
+        )
+
+        if fiscal_year is None:
+            continue
+
+        if not is_standalone_quarter(
+            fact
+        ):
+            continue
+
+        start = fact.get("start")
+        end = fact.get("end")
+
+        key = (
+            fiscal_year,
+            quarter,
+        )
+
+        candidate = {
+            "period_end": end,
+            "period_type": "quarterly",
+            "statement_type": "income_cash_flow",
+            "start": start,
+            "filed_date": fact.get("filed"),
+            "fiscal_year": fiscal_year,
+            "fiscal_quarter": quarter,
+            "revenue": fact.get("val"),
+        }
+
+        existing = periods.get(key)
+
+        if existing is None:
+            periods[key] = candidate
+            continue
+
+        existing_filed = (
+            existing.get("filed_date") or ""
+        )
+
+        candidate_filed = (
+            candidate.get("filed_date") or ""
+        )
+
+        if candidate_filed >= existing_filed:
+            periods[key] = candidate
+
+    # ---------------------------------------------------------
+    # Add the remaining quarterly duration metrics.
+    # ---------------------------------------------------------
+
+    for key, period in periods.items():
+        fiscal_year, quarter = key
+        end = period["period_end"]
+
+        for field in duration_fields:
+            if field == "revenue":
+                continue
+
+            facts = concept_facts.get(
+                field,
+                [],
+            )
+
+            candidates = []
+
+            for fact in facts:
+                if fact.get("form") != "10-Q":
+                    continue
+
+                if safe_int(fact.get("fy")) != fiscal_year:
+                    continue
+
+                if get_sec_fiscal_quarter(
+                    fact
+                ) != quarter:
+                    continue
+
+                if fact.get("end") != end:
+                    continue
+
+                if not is_standalone_quarter(
+                    fact
+                ):
+                    continue
+
+                candidates.append(
+                    fact
+                )
+
+            best = choose_latest_fact(
+                candidates
+            )
+
+            if best is None:
+                continue
+
+            period[field] = best.get(
+                "val"
+            )
+
+            if best.get("filed"):
+                current_filed = (
+                    period.get("filed_date")
+                    or ""
+                )
+
+                if best["filed"] > current_filed:
+                    period["filed_date"] = (
+                        best["filed"]
+                    )
+
+    # ---------------------------------------------------------
+    # DERIVE GROSS PROFIT
+    #
+    # If the SEC provides GrossProfit directly, use it.
+    #
+    # Otherwise:
+    #
+    # Gross Profit = Revenue - Cost of Goods Sold
+    # ---------------------------------------------------------
+
+    for period in periods.values():
+        if period.get("gross_profit") is not None:
+            continue
+
+        revenue = period.get(
+            "revenue"
+        )
+
+        cost = period.get(
+            "cost_of_goods_sold"
+        )
+
+        if (
+            revenue is not None
+            and cost is not None
+        ):
+            period["gross_profit"] = (
+                revenue - cost
+            )
+
+    # ---------------------------------------------------------
+    # Balance-sheet values
+    #
+    # These are point-in-time values, so use the matching
+    # quarter-end date from 10-Q facts.
+    # ---------------------------------------------------------
+
+    instant_fields = {
+        "total_assets",
+        "total_liabilities",
+        "total_equity",
+        "cash_and_equivalents",
+    }
+
+    for key, period in periods.items():
+        end = period["period_end"]
+
+        for field in instant_fields:
+            facts = concept_facts.get(
+                field,
+                [],
+            )
+
+            candidates = []
+
+            for fact in facts:
+                if fact.get("form") != "10-Q":
+                    continue
+
+                if fact.get("end") != end:
+                    continue
+
+                if safe_int(fact.get("fy")) != key[0]:
+                    continue
+
+                candidates.append(
+                    fact
+                )
+
+            best = choose_latest_fact(
+                candidates
+            )
+
+            if best is not None:
+                period[field] = best.get(
+                    "val"
+                )
+
+                if best.get("filed"):
+                    current_filed = (
+                        period.get("filed_date")
+                        or ""
+                    )
+
+                    if best["filed"] > current_filed:
+                        period["filed_date"] = (
+                            best["filed"]
+                        )
+
+    # ---------------------------------------------------------
+    # BUILD ANNUAL DATA FOR Q4
+    # ---------------------------------------------------------
+
+    annual_periods = build_annual_periods(
+        data,
+        concept_map,
+    )
+
+    annual_by_fiscal_year = {}
+
+    for annual in annual_periods:
+        fiscal_year = annual.get(
+            "fiscal_year"
+        )
+
+        if fiscal_year is None:
+            continue
+
+        annual_by_fiscal_year[
+            fiscal_year
+        ] = annual
+
+    # ---------------------------------------------------------
+    # CREATE Q4
+    #
+    # Q4 = FY - Q1 - Q2 - Q3
+    #
+    # We only calculate Q4 for flow metrics.
+    # ---------------------------------------------------------
+
+    q4_fields = {
+        "revenue",
+        "cost_of_goods_sold",
+        "gross_profit",
+        "operating_income",
+        "net_income",
+        "operating_cash_flow",
+        "capital_expenditures",
+    }
+
+    for fiscal_year, annual in (
+        annual_by_fiscal_year.items()
+    ):
+        q1 = periods.get(
+            (fiscal_year, 1)
+        )
+
+        q2 = periods.get(
+            (fiscal_year, 2)
+        )
+
+        q3 = periods.get(
+            (fiscal_year, 3)
+        )
+
+        if not q1 or not q2 or not q3:
+            continue
+
+        annual_end = annual.get(
+            "period_end"
+        )
+
+        if not annual_end:
+            continue
+
+        q4 = {
+            "period_end": annual_end,
+            "period_type": "quarterly",
+            "statement_type": "income_cash_flow",
+            "start": None,
+            "filed_date": annual.get(
+                "filed_date"
+            ),
+            "fiscal_year": fiscal_year,
+            "fiscal_quarter": 4,
+        }
+
+        for field in q4_fields:
+            annual_value = annual.get(
+                field
+            )
+
+            q1_value = q1.get(
+                field
+            )
+
+            q2_value = q2.get(
+                field
+            )
+
+            q3_value = q3.get(
+                field
+            )
+
+            if (
+                annual_value is None
+                or q1_value is None
+                or q2_value is None
+                or q3_value is None
+            ):
+                continue
+
+            q4[field] = (
+                annual_value
+                - q1_value
+                - q2_value
+                - q3_value
+            )
+
+        # -----------------------------------------------------
+        # EPS
+        #
+        # EPS is not additive.
+        # -----------------------------------------------------
+
+        q4["eps_basic"] = None
+        q4["eps_diluted"] = None
+
+        # -----------------------------------------------------
+        # Q4 balance-sheet values come from the annual June/
+        # December/etc. period-end balance.
+        # -----------------------------------------------------
+
+        for field in {
+            "total_assets",
+            "total_liabilities",
+            "total_equity",
+            "cash_and_equivalents",
+        }:
+            q4[field] = annual.get(
+                field
+            )
+
+        # -----------------------------------------------------
+        # Q4 free cash flow.
+        # -----------------------------------------------------
+
+        ocf = q4.get(
+            "operating_cash_flow"
+        )
+
+        capex = q4.get(
+            "capital_expenditures"
+        )
+
+        if (
+            ocf is not None
+            and capex is not None
+        ):
+            q4["free_cash_flow"] = (
+                ocf - capex
+            )
+
+        periods[
+            (fiscal_year, 4)
+        ] = q4
+
+    # ---------------------------------------------------------
+    # RECONCILIATION
+    # ---------------------------------------------------------
+
+    reconciliation_fields = {
+        "revenue",
+        "cost_of_goods_sold",
+        "gross_profit",
+        "operating_income",
+        "net_income",
+        "operating_cash_flow",
+        "capital_expenditures",
+    }
+
+    print()
+    print(
+        "QUARTERLY / ANNUAL RECONCILIATION"
+    )
+    print()
+
+    reconciliation_failed = False
+
+    for fiscal_year, annual in sorted(
+        annual_by_fiscal_year.items(),
+        reverse=True,
+    ):
+        quarterly = [
+            periods.get(
+                (fiscal_year, quarter)
+            )
+            for quarter in (
+                1,
+                2,
+                3,
+                4,
+            )
+        ]
+
+        if any(
+            quarter is None
+            for quarter in quarterly
+        ):
+            continue
+
+        print(
+            f"FY{fiscal_year}"
+        )
+
+        for field in sorted(
+            reconciliation_fields
+        ):
+            annual_value = annual.get(
+                field
+            )
+
+            quarterly_values = [
+                quarter.get(field)
+                for quarter in quarterly
+            ]
+
+            if (
+                annual_value is None
+                or any(
+                    value is None
+                    for value in quarterly_values
+                )
+            ):
+                continue
+
+            quarterly_total = sum(
+                quarterly_values
+            )
+
+            difference = (
+                quarterly_total
+                - annual_value
+            )
+
+            tolerance = max(
+                1.0,
+                abs(annual_value) * 0.000001,
+            )
+
+            if abs(difference) > tolerance:
+                reconciliation_failed = True
+
+                print(
+                    f"  FAIL {field}: "
+                    f"annual={annual_value:,.2f} "
+                    f"quarterly={quarterly_total:,.2f} "
+                    f"difference={difference:,.2f}"
+                )
+            else:
+                print(
+                    f"  PASS {field}"
+                )
+
+    if reconciliation_failed:
+        raise RuntimeError(
+            "Quarterly/annual financial "
+            "reconciliation failed. "
+            "No quarterly records should "
+            "be considered trustworthy until "
+            "the discrepancy is investigated."
+        )
+
+    print()
+    print(
+        "All available quarterly/annual "
+        "reconciliations passed."
+    )
+
+    # ---------------------------------------------------------
+    # FREE CASH FLOW
+    # ---------------------------------------------------------
+
+    for period in periods.values():
+        ocf = period.get(
+            "operating_cash_flow"
+        )
+
+        capex = period.get(
+            "capital_expenditures"
+        )
+
+        if (
+            ocf is not None
+            and capex is not None
+        ):
+            period["free_cash_flow"] = (
+                ocf - capex
+            )
+
+    # ---------------------------------------------------------
+    # SORT
+    # ---------------------------------------------------------
+
+    sorted_periods = sorted(
+        periods.values(),
+        key=lambda x: (
+            x["period_end"],
+            x.get("fiscal_quarter") or 0,
+        ),
+        reverse=True,
+    )
+
+    # ---------------------------------------------------------
+    # DISPLAY
+    # ---------------------------------------------------------
+
+    for period in sorted_periods[:16]:
+        print(
+            f"FY{period.get('fiscal_year')} "
+            f"Q{period.get('fiscal_quarter')} | "
+            f"Period End: "
+            f"{period['period_end']} | "
+            f"Filed: "
+            f"{period.get('filed_date')}"
+        )
+
+        print("-" * 70)
+
+        print(
+            f"Revenue:              "
+            f"{format_money(period.get('revenue'))}"
+        )
+
+        print(
+            f"Cost of Goods Sold:   "
+            f"{format_money(period.get('cost_of_goods_sold'))}"
+        )
+
+        print(
+            f"Gross Profit:         "
+            f"{format_money(period.get('gross_profit'))}"
+        )
+
+        print(
+            f"Operating Income:     "
+            f"{format_money(period.get('operating_income'))}"
+        )
+
+        print(
+            f"Net Income:           "
+            f"{format_money(period.get('net_income'))}"
+        )
+
+        print(
+            f"Operating Cash Flow:  "
+            f"{format_money(period.get('operating_cash_flow'))}"
+        )
+
+        print(
+            f"CapEx:                "
+            f"{format_money(period.get('capital_expenditures'))}"
+        )
+
+        print(
+            f"Free Cash Flow:       "
+            f"{format_money(period.get('free_cash_flow'))}"
+        )
+
+        print()
+
+    return sorted_periods
 
     def determine_quarter(end):
         if not end:
@@ -980,13 +1677,8 @@ def build_quarterly_periods(data, concept_map):
         # than subtracting quarterly EPS values.
         # -----------------------------------------------------
 
-        q4["eps_basic"] = annual.get(
-            "eps_basic"
-        )
-
-        q4["eps_diluted"] = annual.get(
-            "eps_diluted"
-        )
+        q4["eps_basic"] = None
+        q4["eps_diluted"] = None
 
         # -----------------------------------------------------
         # Q4 balance-sheet values are point-in-time values.

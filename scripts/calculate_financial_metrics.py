@@ -27,6 +27,23 @@ def growth(current, previous):
 
     Returns None when either value is unavailable
     or when the previous value is zero.
+
+    FIX (see financial_growth_classified investigation):
+    Dividing by a raw (possibly negative) `previous` value produces
+    sign-inverted, misleading percentages whenever a company moves
+    between a loss and a profit. For example, MSFT going from a
+    -$6.3B quarterly loss to an $8.4B profit computed as -233.6%
+    under the old formula, even though that's a large improvement.
+
+    Using ABS(previous) as the denominator keeps the percentage's
+    sign aligned with the actual direction of change (positive =
+    improved, negative = declined) regardless of which side of zero
+    the comparison crosses. This does NOT fully solve the problem —
+    a sign-transition growth percentage is still a blunt instrument
+    for describing "loss narrowed" vs "swung to a loss" cases — but
+    it removes the counterintuitive inverted-sign distortion, and
+    matches the classification already verified in
+    financial_growth_classified.
     """
     if current is None or previous is None:
         return None
@@ -34,7 +51,7 @@ def growth(current, previous):
     if previous == 0:
         return None
 
-    return (current - previous) / previous
+    return (current - previous) / abs(previous)
 
 
 def ratio(numerator, denominator):

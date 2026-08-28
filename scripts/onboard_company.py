@@ -3,10 +3,6 @@ import sys
 import requests
 
 
-# ============================================================
-# CONFIGURATION
-# ============================================================
-
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 TWELVE_DATA_API_KEY = os.getenv("TWELVE_DATA_API_KEY")
@@ -29,21 +25,7 @@ SUPABASE_HEADERS = {
 }
 
 
-# ============================================================
-# TWELVE DATA
-# ============================================================
-
 def search_symbol(company_name):
-    """
-    Search Twelve Data for a company and select the preferred
-    U.S. common-stock listing.
-
-    Preferred listing:
-        - NYSE or NASDAQ
-        - Common Stock
-        - USD
-    """
-
     url = "https://api.twelvedata.com/symbol_search"
 
     params = {
@@ -77,19 +59,9 @@ def search_symbol(company_name):
             f"No search results found for '{company_name}'"
         )
 
-    # --------------------------------------------------------
-    # Find U.S. common-stock candidates.
-    #
-    # We deliberately do NOT depend on the "country" field.
-    # Twelve Data's country field is not needed because the
-    # exchange + instrument type + currency gives us the
-    # selection criteria we need.
-    # --------------------------------------------------------
-
     candidates = []
 
     for item in data:
-
         instrument_type = str(
             item.get("instrument_type", "")
         ).strip().lower()
@@ -103,7 +75,7 @@ def search_symbol(company_name):
         ).strip().upper()
 
         if (
-            instrument_type == "common stock"
+            instrument_type in ("common stock", "etf")
             and currency == "USD"
             and exchange in ("NYSE", "NASDAQ")
         ):
@@ -136,14 +108,19 @@ def search_symbol(company_name):
             f"No suitable U.S. common stock found for '{company_name}'"
         )
 
-    # --------------------------------------------------------
-    # Prefer a company-name match.
-    # --------------------------------------------------------
-
     company_lower = company_name.strip().lower()
+    company_upper = company_name.strip().upper()
+
+    # Prefer an EXACT ticker match first. Without this, searching "AMD"
+    # can incorrectly match something like "GraniteShares 2x Long AMD
+    # Daily ETF" (ticker AMDL) purely because "AMD" appears as a
+    # substring in that ETF's name, even though it's a completely
+    # different instrument from the real AMD common stock.
+    for candidate in candidates:
+        if str(candidate.get("symbol", "")).strip().upper() == company_upper:
+            return candidate
 
     for candidate in candidates:
-
         instrument_name = str(
             candidate.get("instrument_name", "")
         ).strip().lower()
@@ -151,20 +128,10 @@ def search_symbol(company_name):
         if company_lower in instrument_name:
             return candidate
 
-    # If there is no exact name match, use the first valid
-    # U.S. common-stock candidate.
     return candidates[0]
 
 
-# ============================================================
-# SUPABASE - ENTITIES
-# ============================================================
-
 def find_entity(ticker):
-    """
-    Find an existing company entity by ticker.
-    """
-
     url = f"{SUPABASE_URL}/rest/v1/entities"
 
     params = {
@@ -196,10 +163,6 @@ def find_entity(ticker):
 
 
 def create_entity(company):
-    """
-    Create a company entity in Supabase.
-    """
-
     url = f"{SUPABASE_URL}/rest/v1/entities"
 
     payload = {
@@ -237,15 +200,7 @@ def create_entity(company):
     return rows[0]
 
 
-# ============================================================
-# SUPABASE - SECURITIES
-# ============================================================
-
 def find_security(ticker, exchange):
-    """
-    Find an existing security by ticker + exchange.
-    """
-
     url = f"{SUPABASE_URL}/rest/v1/securities"
 
     params = {
@@ -277,17 +232,16 @@ def find_security(ticker, exchange):
 
 
 def create_security(entity_id, company):
-    """
-    Create a security linked to an entity.
-    """
-
     url = f"{SUPABASE_URL}/rest/v1/securities"
+
+    instrument_type = str(company.get("instrument_type", "")).strip().lower()
+    security_type = "etf" if instrument_type == "etf" else "common_stock"
 
     payload = {
         "entity_id": entity_id,
         "ticker": company["symbol"],
         "exchange": company["exchange"],
-        "security_type": "common_stock",
+        "security_type": security_type,
         "currency": company["currency"],
     }
 
@@ -319,10 +273,6 @@ def create_security(entity_id, company):
     return rows[0]
 
 
-# ============================================================
-# MAIN ONBOARDING PROCESS
-# ============================================================
-
 def onboard_company(company_name):
 
     print()
@@ -331,10 +281,6 @@ def onboard_company(company_name):
     print("=" * 60)
     print("Company:", company_name)
     print("=" * 60)
-
-    # --------------------------------------------------------
-    # 1. Discover security through Twelve Data
-    # --------------------------------------------------------
 
     company = search_symbol(company_name)
 
@@ -349,33 +295,20 @@ def onboard_company(company_name):
     print("  Type:", company["instrument_type"])
     print("  Currency:", company["currency"])
 
-    # --------------------------------------------------------
-    # 2. Find or create entity
-    # --------------------------------------------------------
-
     print()
 
     entity = find_entity(ticker)
 
     if entity:
-
         print("Existing entity found:")
         print("  ID:", entity["id"])
         print("  Name:", entity["name"])
-
     else:
-
         print("Entity not found. Creating...")
-
         entity = create_entity(company)
-
         print("Created entity:")
         print("  ID:", entity["id"])
         print("  Name:", entity["name"])
-
-    # --------------------------------------------------------
-    # 3. Find or create security
-    # --------------------------------------------------------
 
     print()
 
@@ -385,29 +318,20 @@ def onboard_company(company_name):
     )
 
     if security:
-
         print("Existing security found:")
         print("  ID:", security["id"])
         print("  Ticker:", security["ticker"])
         print("  Exchange:", security["exchange"])
-
     else:
-
         print("Security not found. Creating...")
-
         security = create_security(
             entity["id"],
             company,
         )
-
         print("Created security:")
         print("  ID:", security["id"])
         print("  Ticker:", security["ticker"])
         print("  Exchange:", security["exchange"])
-
-    # --------------------------------------------------------
-    # 4. Final result
-    # --------------------------------------------------------
 
     print()
     print("=" * 60)
@@ -420,10 +344,6 @@ def onboard_company(company_name):
     print("=" * 60)
     print()
 
-
-# ============================================================
-# COMMAND LINE ENTRY POINT
-# ============================================================
 
 if __name__ == "__main__":
 

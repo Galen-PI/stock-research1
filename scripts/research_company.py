@@ -2,7 +2,13 @@ import os
 import sys
 import requests
 from datetime import date, timedelta
-
+from sec_company_lookup import require_sec_company
+from ingest_sec_financials import (
+    ingest_financials_for_security,
+)
+from populate_financial_metrics import (
+    populate_metrics,
+)
 from onboard_company import (
     search_symbol,
     find_entity,
@@ -38,6 +44,58 @@ SUPABASE_HEADERS = {
 # ------------------------------------------------------------
 # DATABASE
 # ------------------------------------------------------------
+def ingest_sec_financials(
+    security,
+):
+    """
+    Retrieve and normalize SEC financial statements
+    for the company's security.
+    """
+
+    ticker = security["ticker"]
+    security_id = security["id"]
+
+    print()
+    print("STEP 5: SEC FINANCIALS")
+    print("-" * 60)
+
+    print("Ticker:", ticker)
+    print("Security ID:", security_id)
+
+    sec_company = require_sec_company(
+        ticker
+    )
+
+    print()
+    print(
+        f"SEC company identified: "
+        f"{sec_company['title']}"
+    )
+
+    result = ingest_financials_for_security(
+        ticker,
+        security_id,
+    )
+
+    print()
+    print("SEC financial ingestion finished.")
+
+    return result
+
+def populate_financial_metrics_for_company():
+    """
+    Calculate derived financial metrics from
+    financial_statements.
+    """
+
+    print()
+    print("STEP 6: FINANCIAL METRICS")
+    print("-" * 60)
+
+    populate_metrics()
+
+    print()
+    print("Financial metrics finished.")
 
 def get_existing_dates(security_id):
     """
