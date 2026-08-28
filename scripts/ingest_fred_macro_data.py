@@ -48,19 +48,18 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 FRED_BASE_URL = "https://api.stlouisfed.org/fred/series/observations"
 
 # series_id -> (event_type_hint, revision_marker, has_vintage_history)
+# NOTE: revision_marker uses the sentinel 'standard' instead of None/NULL for
+# series without genuine revisions -- NULL values break standard uniqueness
+# comparisons in Postgres (NULL is never equal to NULL), which caused a real
+# duplication bug earlier when re-running this script. A real sentinel value
+# avoids that whole class of problem.
 SERIES_MAP = {
-    "DFEDTARU": ("monetary_policy", None, False),   # Fed funds target range - upper bound
-    "DFEDTARL": ("monetary_policy", None, False),   # Fed funds target range - lower bound
-    "CPIAUCSL": ("inflation_report", None, True),   # CPI, all urban consumers
-    "PAYEMS": ("employment_report", None, True),    # Nonfarm payrolls
-    "UNRATE": ("employment_report", None, True),    # Unemployment rate
-    # NOTE: GDPC1 also has no ALFRED vintage history available (confirmed
-    # directly via FRED's own error response), same situation as the rate
-    # series above. Using simple fetch, which means we get the current/
-    # latest-known GDP value rather than the originally-reported advance
-    # estimate. This is a real, documented limitation affecting this one
-    # series only -- not something worth continuing to chase.
-    "GDPC1": ("gdp_report", "advance", False),      # Real GDP - advance estimate
+    "DFEDTARU": ("monetary_policy", "standard", False),
+    "DFEDTARL": ("monetary_policy", "standard", False),
+    "CPIAUCSL": ("inflation_report", "standard", True),
+    "PAYEMS": ("employment_report", "standard", True),
+    "UNRATE": ("employment_report", "standard", True),
+    "GDPC1": ("gdp_report", "advance", False),
 }
 
 EARLIEST_DATE = "1994-01-01"  # matches earliest tracked company data
@@ -193,7 +192,7 @@ def upsert_batch(rows: list[dict], batch_size: int = 500):
     for i in range(0, len(rows), batch_size):
         batch = rows[i:i + batch_size]
         supabase.table("macro_data_releases").upsert(
-            batch, on_conflict="series_id,release_date,revision_marker"
+            batch, on_conflict="series_id,period_covered,revision_marker"
         ).execute()
         print(f"    ...upserted rows {i + 1}-{i + len(batch)} of {len(rows)}")
 
