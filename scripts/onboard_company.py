@@ -75,7 +75,7 @@ def search_symbol(company_name):
         ).strip().upper()
 
         if (
-            instrument_type in ("common stock", "etf")
+            instrument_type in ("common stock", "etf", "reit")
             and currency == "USD"
             and exchange in ("NYSE", "NASDAQ")
         ):

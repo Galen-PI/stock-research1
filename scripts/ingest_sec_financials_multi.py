@@ -31,6 +31,8 @@ CONCEPTS = {
         "RevenueFromContractWithCustomerExcludingAssessedTax",
         "Revenues",
         "SalesRevenueNet",
+        "OperatingLeasesIncomeStatementLeaseRevenue",
+        "RealEstateRevenueNet",
     ],
     "gross_profit": ["GrossProfit"],
     "operating_income": ["OperatingIncomeLoss"],
@@ -56,6 +58,14 @@ CIK_TO_TICKER = {
     "1045810": "NVDA",
     "2488": "AMD",
     "19617": "JPM",
+    "37996": "F",
+    "80424": "PG",
+    "40545": "GE",
+    "34088": "XOM",
+    "4904": "AEP",
+    "1707925": "LIN",
+    "1045609": "PLD",
+    "732717": "T",
 }
 
 # Each ticker's fiscal year end, needed for correct quarter/Q4 derivation.
@@ -66,6 +76,14 @@ FISCAL_YEAR_END = {
     "NVDA": (1, 31),
     "AMD": (12, 31),   # AMD's actual FY end floats slightly (last Saturday of December), approximated
     "JPM": (12, 31),   # standard calendar year
+    "F": (12, 31),      # standard calendar year
+    "PG": (6, 30),      # fiscal year ends June 30
+    "GE": (12, 31),     # standard calendar year
+    "XOM": (12, 31),    # standard calendar year
+    "AEP": (12, 31),    # standard calendar year
+    "LIN": (12, 31),    # standard calendar year; company formed 2017, business combination completed Oct 2018
+    "PLD": (12, 31),    # standard calendar year; REIT, formerly AMB Property Corporation
+    "T": (12, 31),      # standard calendar year
 }
 
 

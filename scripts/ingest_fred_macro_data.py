@@ -8,21 +8,27 @@ and a per-series relative threshold flag, and upserts into macro_data_releases.
 Two distinct fetch strategies are used, because these series are genuinely
 different kinds of data:
 
-  - DFEDTARU / DFEDTARL (Fed funds target range): these are POLICY DECISIONS,
-    not measured statistics. The Fed announces a rate and it is never later
-    "revised" the way survey/estimate data is. FRED confirms these series
-    have no ALFRED vintage history at all. Simple fetch, no chunking needed.
+  - DFEDTARU / DFEDTARL / DGS10 (rates): market rates / policy decisions, not
+    measured/estimated statistics. These are never later "revised" the way
+    survey/estimate data is. Simple fetch, no chunking needed.
 
-  - CPIAUCSL / PAYEMS / UNRATE / GDPC1: these ARE measured/estimated
-    statistics that get revised over time as more complete data comes in.
-    For these, we fetch the full vintage history (chunked, since FRED caps
-    vintage requests at 2000 per call) and take the EARLIEST vintage per
-    period -- the number as first published, which is what markets actually
-    reacted to at the time, not a later revision. This also gives us the
-    TRUE public release date (vintage realtime_start), not the period the
-    data describes -- matching the project's established principle that
-    event timestamp = disclosure date, not period-end (the same fix already
-    applied to PFE Q4 2020 earlier this project).
+  - CPIAUCSL / PAYEMS / UNRATE / GDPC1 / PCEPI: measured/estimated statistics
+    that get revised over time as more complete data comes in. For these, we
+    fetch the full vintage history (chunked, since FRED caps vintage requests
+    at 2000 per call) and take the EARLIEST vintage per period -- the number
+    as first published, which is what markets actually reacted to at the
+    time, not a later revision. This also gives us the TRUE public release
+    date (vintage realtime_start), not the period the data describes --
+    matching the project's established principle that event timestamp =
+    disclosure date, not period-end.
+
+IMPORTANT: not every series classified as "has vintage history" actually
+has one available in ALFRED (GDPC1 turned out not to, despite being a real
+revised statistic, discovered via a real debugging round earlier this
+project). To avoid needing manual intervention every time a new series is
+added, fetch_with_vintage_history now automatically detects FRED's "does
+not exist in ALFRED" error and falls back to the simple fetch instead of
+crashing.
 
 Requires:
     FRED_API_KEY    - free key from https://fred.stlouisfed.org/docs/api/api_key.html
@@ -48,11 +54,6 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 FRED_BASE_URL = "https://api.stlouisfed.org/fred/series/observations"
 
 # series_id -> (event_type_hint, revision_marker, has_vintage_history)
-# NOTE: revision_marker uses the sentinel 'standard' instead of None/NULL for
-# series without genuine revisions -- NULL values break standard uniqueness
-# comparisons in Postgres (NULL is never equal to NULL), which caused a real
-# duplication bug earlier when re-running this script. A real sentinel value
-# avoids that whole class of problem.
 SERIES_MAP = {
     "DFEDTARU": ("monetary_policy", "standard", False),
     "DFEDTARL": ("monetary_policy", "standard", False),
@@ -60,12 +61,15 @@ SERIES_MAP = {
     "PAYEMS": ("employment_report", "standard", True),
     "UNRATE": ("employment_report", "standard", True),
     "GDPC1": ("gdp_report", "advance", False),
+    # New this round:
+    "DGS10": ("monetary_policy", "standard", False),   # 10-Year Treasury yield -- daily market rate, no revision history expected (same reasoning as the Fed funds target series)
+    "PCEPI": ("inflation_report", "standard", True),   # PCE Price Index -- the Fed's own preferred inflation gauge, a genuine revised BEA statistic like CPI
 }
 
 EARLIEST_DATE = "1994-01-01"  # matches earliest tracked company data
 
 
-def fetch_with_retry(params: dict, max_retries: int = 5) -> requests.Response:
+def fetch_with_retry(params: dict, max_retries: int = 5):
     """Wraps a FRED request with retry-and-backoff specifically for rate
     limiting (429), so a transient limit hit doesn't kill the whole run."""
     for attempt in range(max_retries):
@@ -77,11 +81,11 @@ def fetch_with_retry(params: dict, max_retries: int = 5) -> requests.Response:
             time.sleep(wait)
             continue
         return resp
-    return resp  # give up after max_retries, let caller handle the final failure
+    return resp
 
 
 def fetch_simple(series_id: str) -> list[dict]:
-    """For series with no revision history (policy decisions, not estimates).
+    """For series with no revision history (policy decisions, market rates).
     Uses the plain default fetch -- no vintage complexity needed or
     supported."""
     params = {
@@ -98,9 +102,6 @@ def fetch_simple(series_id: str) -> list[dict]:
         obs for obs in data.get("observations", [])
         if obs["value"] != "."
     ]
-    # No true realtime_start available/meaningful here; use the period date
-    # itself as release_date, since for these series the announcement date
-    # and the "date" field are effectively the same (no revision timeline).
     for obs in observations:
         obs["realtime_start"] = obs["date"]
     return observations
@@ -109,15 +110,18 @@ def fetch_simple(series_id: str) -> list[dict]:
 def fetch_with_vintage_history(series_id: str) -> list[dict]:
     """For series with genuine revision history. Fetches ALL historical
     vintages (chunked by year, since FRED caps vintage requests at 2000 per
-    call) and collapses to the EARLIEST vintage per period -- the value as
-    first published, with its true public release date."""
+    call) and collapses to the EARLIEST vintage per period. If FRED reports
+    the series has no ALFRED vintage history at all (discovered via error
+    text, not assumed), automatically falls back to the simple fetch
+    instead of crashing -- avoids repeating the GDPC1 debugging round for
+    future series additions."""
     earliest_by_period: dict[str, dict] = {}
     current_year = date.today().year
 
     for chunk_start_year in range(1980, current_year + 1):
         chunk_end = f"{chunk_start_year}-12-31"
         if chunk_start_year == current_year:
-            chunk_end = date.today().isoformat()  # can't request a future realtime_end
+            chunk_end = date.today().isoformat()
 
         params = {
             "series_id": series_id,
@@ -129,6 +133,13 @@ def fetch_with_vintage_history(series_id: str) -> list[dict]:
             "realtime_end": chunk_end,
         }
         resp = fetch_with_retry(params)
+
+        if resp.status_code == 400 and "does not exist in ALFRED" in resp.text:
+            print(f"    {series_id} has no ALFRED vintage history "
+                  f"(confirmed via FRED's own error text) -- "
+                  f"falling back to simple fetch automatically.")
+            return fetch_simple(series_id)
+
         if resp.status_code != 200:
             print(f"  Error on chunk {chunk_start_year} for {series_id}:")
             print(f"  {resp.text}")
@@ -145,15 +156,14 @@ def fetch_with_vintage_history(series_id: str) -> list[dict]:
 
         if chunk_start_year % 5 == 0:
             print(f"    ...processed through {chunk_start_year}")
-        time.sleep(0.6)  # increased from 0.1s for more safety margin under 120/min limit
+        time.sleep(0.6)
 
     return sorted(earliest_by_period.values(), key=lambda o: o["date"])
 
 
 def compute_median_abs_change(values: list[float]) -> float:
     """Median absolute period-over-period change, used as this series' own
-    volatility baseline for threshold flagging (mirrors the company-relative
-    approach already used in candidate_financial_events)."""
+    volatility baseline for threshold flagging."""
     changes = [abs(values[i] - values[i - 1]) for i in range(1, len(values))]
     if not changes:
         return 0.0
@@ -187,8 +197,6 @@ def build_release_row(series_id, event_type_hint, revision_marker,
 
 
 def upsert_batch(rows: list[dict], batch_size: int = 500):
-    """Upsert in batches instead of one row at a time -- one row-per-request
-    was taking far too long for daily series with thousands of observations."""
     for i in range(0, len(rows), batch_size):
         batch = rows[i:i + batch_size]
         supabase.table("macro_data_releases").upsert(

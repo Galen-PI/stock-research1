@@ -24,6 +24,14 @@ COMPANIES = [
     {"ticker": "NVDA", "cik": "0001045810", "security_id": "97f01831-c930-4f24-932d-f108c9d9920d"},
     {"ticker": "AMD", "cik": "0000002488", "security_id": "3f29f0df-b0dc-4835-a178-51b2f2f77b8b"},
     {"ticker": "JPM", "cik": "0000019617", "security_id": "18e6571e-4e2a-4a99-b1cc-da272fcdd804"},
+    {"ticker": "F", "cik": "0000037996", "security_id": "f6672945-fd51-40eb-b944-3ffc023477a1"},
+    {"ticker": "PG", "cik": "0000080424", "security_id": "f372970f-226a-45d3-8a17-6b6d4cd3d165"},
+    {"ticker": "GE", "cik": "0000040545", "security_id": "d323173c-0c10-424a-8e11-16da056dc64b"},
+    {"ticker": "XOM", "cik": "0000034088", "security_id": "00f36a8d-0384-42af-b98b-f7a941dca2fb"},
+    {"ticker": "AEP", "cik": "0000004904", "security_id": "3e9ae25a-57f6-4c32-ba08-62dc23c3249d"},
+    {"ticker": "LIN", "cik": "0001707925", "security_id": "8522ea96-efa5-4b73-ba3e-93c57e59a4f6"},
+    {"ticker": "PLD", "cik": "0001045609", "security_id": "436f1a7e-c919-4993-a591-277e118e2d2e"},
+    {"ticker": "T", "cik": "0000732717", "security_id": "8007a692-bfaa-4e49-a168-3957764fbc2c"},
 ]
 
 
