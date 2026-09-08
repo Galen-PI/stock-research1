@@ -66,6 +66,7 @@ CIK_TO_TICKER = {
     "1707925": "LIN",
     "1045609": "PLD",
     "732717": "T",
+    "93410": "CVX",
 }
 
 # Each ticker's fiscal year end, needed for correct quarter/Q4 derivation.
@@ -84,6 +85,7 @@ FISCAL_YEAR_END = {
     "LIN": (12, 31),    # standard calendar year; company formed 2017, business combination completed Oct 2018
     "PLD": (12, 31),    # standard calendar year; REIT, formerly AMB Property Corporation
     "T": (12, 31),      # standard calendar year
+    "CVX": (12, 31),      # standard calendar year
 }
 
 

@@ -242,7 +242,6 @@ Adopted the real, industry-standard Global Industry Classification Standard (GIC
 
 1. **Root-cause XOM's quarterly gap properly**, if ever revisited: would require pulling raw XBRL instance documents from individual 10-Q filings (not the aggregated company-facts API), since the standard concept scan found nothing — likely a custom company-specific extension concept from XOM's early XBRL era.
 2. **Build T/AT&T's event history** — the one remaining Tier 1 anchor without a built-out event history, using the proven classifier pipeline.
-3. **Unify `event_market_reactions` and `financial_market_reactions`'s anchor-date logic** — still pending from the original external review, not yet done.
 4. **Build the actual Phase 6 walk-forward evaluation harness** (Section 6) — `pattern_card.py` exists but doesn't yet implement the sector benchmark, base rate comparison, or walk-forward out-of-sample split. This is the real remaining Phase 6 deliverable.
 5. **Consider Tier 2 large-cap sector-filling tickers**, or continue deepening the current 13 with T's event history first.
 6. **Revisit the news-sequence chain-detection Phase 4 idea** once Track B has accumulated enough real article volume to test against.
@@ -260,3 +259,10 @@ Adopted the real, industry-standard Global Industry Classification Standard (GIC
 
 **Global & Unexpected Events**
 - Geopolitical Tensions, Natural Disasters, Systemic Shocks (pandemics, banking crises, commodity supply blockades)
+## Correction (verified this session): Anchor-Date Unification Is Already Resolved
+
+Section 5's Phase 5 notes and Section 10's "immediate next steps" both previously listed unifying `event_market_reactions` and `financial_market_reactions`'s anchor-date logic as still pending. **This is stale — verified with real data this session that it was already fixed** (the `event_market_reactions` day-0 anchor was changed from `>=` to `>` to match `financial_market_reactions` exactly, done in an earlier session but never marked resolved in this doc).
+
+Verification query run this session: compared `abnormal_return_20d` between both views for every `financial_result` event with a match in both. Result: every comparison showed exact agreement (diff = 0.0000) except one (AMD Q3 2024, diff = 0.008), which is fully explained by the filed_date landing one calendar day after the event_date — a normal SEC filing-timing nuance, not measurement error.
+
+**Action taken:** remove this item from the "immediate next steps" list — it's done, not pending. Lesson for future sessions: verify a "known issue" against current real data before re-investigating it; documentation can silently drift out of sync with an already-applied fix.

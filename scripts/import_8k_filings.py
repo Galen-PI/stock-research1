@@ -32,6 +32,7 @@ COMPANIES = [
     {"ticker": "LIN", "cik": "0001707925", "security_id": "8522ea96-efa5-4b73-ba3e-93c57e59a4f6"},
     {"ticker": "PLD", "cik": "0001045609", "security_id": "436f1a7e-c919-4993-a591-277e118e2d2e"},
     {"ticker": "T", "cik": "0000732717", "security_id": "8007a692-bfaa-4e49-a168-3957764fbc2c"},
+    {"ticker": "CVX", "cik": "0000093410", "security_id": "b32f2ff4-fbf6-4d6b-9fe2-cba71be8a8cc"},
 ]
 
 

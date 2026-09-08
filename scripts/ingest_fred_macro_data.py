@@ -64,6 +64,7 @@ SERIES_MAP = {
     # New this round:
     "DGS10": ("monetary_policy", "standard", False),   # 10-Year Treasury yield -- daily market rate, no revision history expected (same reasoning as the Fed funds target series)
     "PCEPI": ("inflation_report", "standard", True),   # PCE Price Index -- the Fed's own preferred inflation gauge, a genuine revised BEA statistic like CPI
+    "DCOILWTICO": ("commodity_price", "standard", False),   # WTI crude oil daily spot price -- genuine daily market price like DGS10/DFEDTARU, no revision history expected. Added after directly observing that abnormal-return-vs-SPY alone could not explain a real XOM vs CVX COVID-response divergence -- SPY does not capture oil-specific price shocks.
 }
 
 EARLIEST_DATE = "1994-01-01"  # matches earliest tracked company data
