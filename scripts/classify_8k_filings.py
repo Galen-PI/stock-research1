@@ -68,8 +68,9 @@ These are CONFIRMED REAL EVENT categories when genuinely present:
 """
 
 
-def get_unclassified_candidates(ticker_filter: str = None) -> list[dict]:
-    query = supabase.table("candidate_8k_events").select("*")
+def get_unclassified_candidates(ticker_filter: str = None, use_legacy: bool = False) -> list[dict]:
+    table_name = "candidate_8k_events_legacy" if use_legacy else "candidate_8k_events"
+    query = supabase.table(table_name).select("*")
     if ticker_filter and ticker_filter != "ALL":
         query = query.eq("ticker", ticker_filter)
     candidates = query.execute().data
@@ -220,8 +221,9 @@ def main():
         print("Usage: python classify_8k_filings.py <TICKER|ALL>")
         sys.exit(1)
     ticker_arg = sys.argv[1]
+    use_legacy = "--legacy" in sys.argv
 
-    candidates = get_unclassified_candidates(ticker_arg)
+    candidates = get_unclassified_candidates(ticker_arg, use_legacy)
     print(f"Found {len(candidates)} unclassified candidates.")
 
     classified_count = 0

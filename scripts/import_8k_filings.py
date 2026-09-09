@@ -18,6 +18,8 @@ supabase_headers = {
 
 # Same four companies already tracked elsewhere in the project.
 COMPANIES = [
+    {"ticker": "BAC", "cik": "0000070858", "security_id": "4c9e419f-2f88-46c4-9e54-5803d37780a5"},
+    {"ticker": "COP", "cik": "0001163165", "security_id": "7dd53ab3-0d1c-4272-bf1e-72459a4e2e99"},
     {"ticker": "MSFT", "cik": "0000789019", "security_id": "eb2e0ce7-4e8a-4345-9b21-783e98266446"},
     {"ticker": "AAPL", "cik": "0000320193", "security_id": "aaa41665-352a-4bce-83a0-b3a119a8c522"},
     {"ticker": "PFE", "cik": "0000078003", "security_id": "ea4ae84e-a0af-4050-b478-4b9bedbe9ca3"},

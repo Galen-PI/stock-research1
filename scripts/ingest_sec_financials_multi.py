@@ -52,6 +52,8 @@ CONCEPTS = {
 
 
 CIK_TO_TICKER = {
+    "70858": "BAC",
+    "1163165": "COP",
     "789019": "MSFT",
     "320193": "AAPL",
     "78003": "PFE",
@@ -86,6 +88,7 @@ FISCAL_YEAR_END = {
     "PLD": (12, 31),    # standard calendar year; REIT, formerly AMB Property Corporation
     "T": (12, 31),      # standard calendar year
     "CVX": (12, 31),      # standard calendar year
+    "BAC": (12, 31),      # standard calendar year
 }
 
 
