@@ -52,6 +52,48 @@ CONCEPTS = {
 
 
 CIK_TO_TICKER = {
+    "51143": "IBM",
+    "858877": "CSCO",
+    "50863": "INTC",
+    "1744489": "DIS",
+    "1166691": "CMCSA",
+    "732712": "VZ",
+    "1393311": "PSA",
+    "1297996": "DLR",
+    "1063761": "SPG",
+    "31462": "ECL",
+    "1666700": "DD",
+    "2969": "APD",
+    "753308": "NEE",
+    "92122": "SO",
+    "1326160": "DUK",
+    "829224": "SBUX",
+    "320187": "NKE",
+    "63908": "MCD",
+    "354950": "HD",
+    "59478": "LLY",
+    "310158": "MRK",
+    "1551152": "ABBV",
+    "731766": "UNH",
+    "200406": "JNJ",
+    "55785": "KMB",
+    "909832": "COST",
+    "104169": "WMT",
+    "21665": "CL",
+    "21344": "KO",
+    "936468": "LMT",
+    "100885": "UNP",
+    "12927": "BA",
+    "18230": "CAT",
+    "66740": "MMM",
+    "773840": "HON",
+    "36104": "USB",
+    "831001": "C",
+    "886982": "GS",
+    "821189": "EOG",
+    "1035002": "VLO",
+    "87347": "SLB",
+    "72971": "WFC",
     "70858": "BAC",
     "1163165": "COP",
     "789019": "MSFT",
@@ -73,6 +115,49 @@ CIK_TO_TICKER = {
 
 # Each ticker's fiscal year end, needed for correct quarter/Q4 derivation.
 FISCAL_YEAR_END = {
+    "IBM": (12, 31),      # standard calendar year (default -- edit manually if non-standard)
+    "CSCO": (12, 31),      # standard calendar year (default -- edit manually if non-standard)
+    "INTC": (12, 31),      # standard calendar year (default -- edit manually if non-standard)
+    "DIS": (12, 31),      # standard calendar year (default -- edit manually if non-standard)
+    "CMCSA": (12, 31),      # standard calendar year (default -- edit manually if non-standard)
+    "VZ": (12, 31),      # standard calendar year (default -- edit manually if non-standard)
+    "PSA": (12, 31),      # standard calendar year (default -- edit manually if non-standard)
+    "DLR": (12, 31),      # standard calendar year (default -- edit manually if non-standard)
+    "SPG": (12, 31),      # standard calendar year (default -- edit manually if non-standard)
+    "ECL": (12, 31),      # standard calendar year (default -- edit manually if non-standard)
+    "DD": (12, 31),      # standard calendar year (default -- edit manually if non-standard)
+    "APD": (12, 31),      # standard calendar year (default -- edit manually if non-standard)
+    "NEE": (12, 31),      # standard calendar year (default -- edit manually if non-standard)
+    "SO": (12, 31),      # standard calendar year (default -- edit manually if non-standard)
+    "DUK": (12, 31),      # standard calendar year (default -- edit manually if non-standard)
+    "SBUX": (12, 31),      # standard calendar year (default -- edit manually if non-standard)
+    "NKE": (12, 31),      # standard calendar year (default -- edit manually if non-standard)
+    "MCD": (12, 31),      # standard calendar year (default -- edit manually if non-standard)
+    "HD": (12, 31),      # standard calendar year (default -- edit manually if non-standard)
+    "LLY": (12, 31),      # standard calendar year (default -- edit manually if non-standard)
+    "MRK": (12, 31),      # standard calendar year (default -- edit manually if non-standard)
+    "ABBV": (12, 31),      # standard calendar year (default -- edit manually if non-standard)
+    "UNH": (12, 31),      # standard calendar year (default -- edit manually if non-standard)
+    "JNJ": (12, 31),      # standard calendar year (default -- edit manually if non-standard)
+    "KMB": (12, 31),      # standard calendar year (default -- edit manually if non-standard)
+    "COST": (12, 31),      # standard calendar year (default -- edit manually if non-standard)
+    "WMT": (12, 31),      # standard calendar year (default -- edit manually if non-standard)
+    "CL": (12, 31),      # standard calendar year (default -- edit manually if non-standard)
+    "KO": (12, 31),      # standard calendar year (default -- edit manually if non-standard)
+    "LMT": (12, 31),      # standard calendar year (default -- edit manually if non-standard)
+    "UNP": (12, 31),      # standard calendar year (default -- edit manually if non-standard)
+    "BA": (12, 31),      # standard calendar year (default -- edit manually if non-standard)
+    "CAT": (12, 31),      # standard calendar year (default -- edit manually if non-standard)
+    "MMM": (12, 31),      # standard calendar year (default -- edit manually if non-standard)
+    "HON": (12, 31),      # standard calendar year (default -- edit manually if non-standard)
+    "USB": (12, 31),      # standard calendar year (default -- edit manually if non-standard)
+    "C": (12, 31),      # standard calendar year (default -- edit manually if non-standard)
+    "GS": (12, 31),      # standard calendar year (default -- edit manually if non-standard)
+    "EOG": (12, 31),      # standard calendar year (default -- edit manually if non-standard)
+    "VLO": (12, 31),      # standard calendar year (default -- edit manually if non-standard)
+    "SLB": (12, 31),      # standard calendar year (default -- edit manually if non-standard)
+    "COP": (12, 31),      # standard calendar year (default -- edit manually if non-standard)
+    "WFC": (12, 31),      # standard calendar year (default -- edit manually if non-standard)
     "MSFT": (6, 30),
     "AAPL": (9, 30),
     "PFE": (12, 31),
