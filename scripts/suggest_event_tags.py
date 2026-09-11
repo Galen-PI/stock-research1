@@ -145,7 +145,7 @@ def main():
     flagged_count = 0
     error_count = 0
 
-    for e in events:
+    for idx, e in enumerate(events, start=1):
         try:
             suggestions = suggest_tags_for_event(e["title"], e.get("description") or "", all_tags)
         except Exception as ex:
@@ -187,6 +187,9 @@ def main():
                 "flagged_for_review": False,
                 "flag_reason": "none",
             }, on_conflict="event_id,suggested_tag_name").execute()
+
+        if idx % 25 == 0:
+            print(f"  ...{idx} of {len(events)} events processed so far")
 
     print(f"\nTotal tag suggestions: {suggestion_count}")
     print(f"Flagged for human review: {flagged_count}")

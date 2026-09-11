@@ -11,15 +11,30 @@ classify_news_candidates.py:
   - flagged_for_review is computed from multiple independent triggers
     (low confidence, uncertain verdict, random audit sample) -- not just
     the AI's own self-reported doubt.
-  - The prompt includes KNOWN ROUTINE PATTERNS learned from today's
-    extensive manual review of the original 6 tickers (GF wafer supply
-    amendments, routine RSU/comp grants, routine debt refinancing,
-    routine credit facility amendments) so the classifier starts smarter
-    than a cold start would.
+  - The prompt includes KNOWN ROUTINE PATTERNS learned from extensive
+    manual review of the original 6 tickers (GF wafer supply amendments,
+    routine RSU/comp grants, routine debt refinancing, routine credit
+    facility amendments) so the classifier starts smarter than a cold
+    start would.
+
+PROMPT v2 UPDATE: added sector-specific routine patterns (REITs,
+insurance, utilities, financial services, healthcare/biotech, energy,
+materials, consumer/retail, technology, labor agreements) ahead of
+classifying ~409 newly-onboarded companies spanning sectors the original
+6-ticker review never covered -- expanding what's recognized as
+routine directly shrinks the review backlog without touching the
+confidence threshold or the novel-real-event safeguard. Also added two
+calibration notes (duplicate-check, verdict-boundary) to reduce
+inconsistent flagging without loosening any actual safety check.
+NOTE: unlike the original list (built from manual review of this
+project's own filings), these sector additions are based on general
+SEC-filing-convention knowledge and have not yet been verified against
+this project's actual data -- treat as a reasonable starting hypothesis,
+not confirmed fact, until spot-checked against real results.
 
 COST NOTE: uses Haiku 4.5. Filing text is longer than news articles, so
 per-call cost is somewhat higher than Track B, but still cheap at this
-scale -- expect well under $10 total for the full ~1,352 candidate backlog.
+scale.
 
 Usage:
     python classify_8k_filings.py F
@@ -40,7 +55,7 @@ ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 MODEL_VERSION = "claude-haiku-4-5-20251001"
-PROMPT_VERSION = "v1"
+PROMPT_VERSION = "v2"
 
 SEC_HEADERS = {"User-Agent": "stock-research1 project contact@example.com"}
 
@@ -56,6 +71,17 @@ genuinely unusual beyond the template:
 - Accounting-driven option vesting acceleration (pre-expensing-rule-change timing)
 - Routine executive employment offer letters (compensation terms only, not a new C-suite appointment)
 - Routine facility lease amendments
+- REITs: routine property acquisitions/dispositions within normal course of business (not a strategic portfolio shift), routine quarterly distribution/dividend declarations at consistent levels
+- Insurance/reinsurance: routine treaty renewals, routine statutory capital or reserve adjustments within normal actuarial ranges, rating agency AFFIRMATIONS (not upgrades/downgrades)
+- Utilities: routine rate-case procedural filings (testimony, scheduling -- not the final commission decision), routine fuel/purchased-power cost adjustment clause filings, routine utility-scale bond issuances for ongoing capital programs
+- Financial services: routine regulatory capital/liquidity ratio disclosures within normal ranges, routine loan-loss reserve adjustments within normal ranges
+- Healthcare/biotech: routine clinical trial phase progression announcements (not efficacy/safety results), routine FDA meeting-request filings (not approval/rejection decisions)
+- Energy/oil & gas: routine hedging program amendments (not a strategic hedging policy change), routine drilling program updates within guided ranges, routine reserve-based lending facility redeterminations
+- Materials/mining: routine mineral reserve/resource estimate updates within normal year-over-year ranges
+- Consumer/retail: routine store opening/closing counts within previously-guided ranges, routine same-store-sales disclosures within guided ranges
+- Technology: routine data center capacity expansion announcements, routine cloud infrastructure agreement renewals
+- Routine union/labor agreement renewals at standard, previously-anticipated terms (a strike, contract rejection, or unusually costly settlement is NOT routine)
+- Routine quarterly/annual dividend declarations at an unchanged or normally-incremented rate (a genuine dividend CUT, suspension, or unusually large increase is NOT routine)
 
 These are CONFIRMED REAL EVENT categories when genuinely present:
 - Acquisitions, mergers, divestitures with real dollar figures and strategic rationale
@@ -65,6 +91,24 @@ These are CONFIRMED REAL EVENT categories when genuinely present:
 - Major partnership/JV agreements with named counterparties and real financial commitments
 - Data breaches, cybersecurity incidents, major recalls
 - Bankruptcy, going-concern issues, major restructuring/spinoffs
+
+CALIBRATION NOTE on possible_duplicate_of: only flag this when the filing
+describes the SAME underlying transaction/event as something in the recent
+events list above (e.g., a "completes acquisition" filing for a deal whose
+"agrees to acquire" filing already exists). A company with few or no
+existing events should rarely or never trigger this -- do not flag a
+duplicate based on topical similarity alone (e.g., two unrelated CFO
+departures years apart are not duplicates of each other).
+
+CALIBRATION NOTE on verdict selection: use "uncertain" ONLY when the filing
+text itself is genuinely ambiguous or incomplete (e.g., truncated text,
+missing key details needed to judge materiality) -- not merely because a
+real_event's full significance is hard to gauge from this filing alone.
+A clearly-routine filing is "likely_noise" even if you're not 100% sure;
+a clearly-material filing is "real_event" even if some details are missing
+(reflect that gap in confidence and reasoning, not by choosing "uncertain").
+Reserve "uncertain" for cases where you genuinely cannot tell which of the
+other two verdicts applies.
 """
 
 
