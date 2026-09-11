@@ -241,6 +241,22 @@ Respond with ONLY valid JSON, no markdown code fences, no other text, in this ex
         parsed["reasoning"] = (parsed.get("reasoning") or "") + " [FORCED TO UNCERTAIN: missing required fields]"
         parsed["confidence"] = 0.0
 
+    # Real bug found in production: the model occasionally returns a
+    # verdict value that isn't one of the 3 allowed enum values (e.g.
+    # "possible_duplicate_of" instead of "real_event" -- likely
+    # confusing the verdict field with the separate possible_duplicate_of
+    # field). The database's CHECK constraint correctly rejects this,
+    # but without catching it here first, that crashes the entire run
+    # instead of just this one filing. Force to "uncertain" and flag,
+    # same as any other malformed response.
+    VALID_VERDICTS = {"real_event", "likely_noise", "uncertain"}
+    if parsed.get("verdict") not in VALID_VERDICTS:
+        original_verdict = parsed.get("verdict")
+        parsed["verdict"] = "uncertain"
+        parsed["confidence"] = 0.0
+        parsed["reasoning"] = (parsed.get("reasoning") or "") + \
+            f" [FORCED TO UNCERTAIN: invalid verdict value '{original_verdict}']"
+
     return parsed
 
 
@@ -284,31 +300,39 @@ def main():
             continue
 
         recent_events = get_recent_event_titles(ticker)
-        ai_result = classify_with_claude(
-            ticker, c["filing_date"], c["item_codes"], filing_text, recent_events
-        )
+        try:
+            ai_result = classify_with_claude(
+                ticker, c["filing_date"], c["item_codes"], filing_text, recent_events
+            )
 
-        random_audit_hit = random.random() < 0.10
-        flagged, flag_reason = compute_flag(ai_result, random_audit_hit)
+            random_audit_hit = random.random() < 0.10
+            flagged, flag_reason = compute_flag(ai_result, random_audit_hit)
 
-        supabase.table("filing_ai_classifications").upsert({
-            "ticker": ticker,
-            "filing_date": c["filing_date"],
-            "accession_number": c["accession_number"],
-            "item_codes": c["item_codes"],
-            "primary_document_url": c["primary_document_url"],
-            "ai_verdict": ai_result["verdict"],
-            "ai_confidence": ai_result["confidence"],
-            "ai_reasoning": ai_result["reasoning"],
-            "ai_suggested_title": ai_result.get("suggested_title"),
-            "ai_suggested_description": ai_result.get("suggested_description"),
-            "ai_suggested_event_type": ai_result.get("suggested_event_type"),
-            "ai_matched_known_template": ai_result.get("matched_known_template"),
-            "model_version": MODEL_VERSION,
-            "prompt_version": PROMPT_VERSION,
-            "flagged_for_review": flagged,
-            "flag_reason": flag_reason,
-        }, on_conflict="ticker,filing_date,accession_number").execute()
+            supabase.table("filing_ai_classifications").upsert({
+                "ticker": ticker,
+                "filing_date": c["filing_date"],
+                "accession_number": c["accession_number"],
+                "item_codes": c["item_codes"],
+                "primary_document_url": c["primary_document_url"],
+                "ai_verdict": ai_result["verdict"],
+                "ai_confidence": ai_result["confidence"],
+                "ai_reasoning": ai_result["reasoning"],
+                "ai_suggested_title": ai_result.get("suggested_title"),
+                "ai_suggested_description": ai_result.get("suggested_description"),
+                "ai_suggested_event_type": ai_result.get("suggested_event_type"),
+                "ai_matched_known_template": ai_result.get("matched_known_template"),
+                "model_version": MODEL_VERSION,
+                "prompt_version": PROMPT_VERSION,
+                "flagged_for_review": flagged,
+                "flag_reason": flag_reason,
+            }, on_conflict="ticker,filing_date,accession_number").execute()
+        except Exception as e:
+            # Defense in depth: even after the verdict-validation fix,
+            # do not let ANY single filing's unexpected error crash a
+            # multi-hour, multi-company run ever again. Log and move on.
+            print(f"  CLASSIFY/WRITE ERROR for {ticker} {c['accession_number']}: {e}")
+            error_count += 1
+            continue
 
         classified_count += 1
         if flagged:
