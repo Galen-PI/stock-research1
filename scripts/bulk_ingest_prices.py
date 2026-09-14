@@ -53,18 +53,23 @@ WINDOW_2 = ("2012-01-01", "2026-09-11")
 
 
 def get_tickers_needing_prices() -> list[str]:
+    # Real bug fixed here: the old version paginated through the ENTIRE
+    # market_prices table (2M+ rows and growing) via the REST API just to
+    # compute which security_ids already had at least one row -- over
+    # 2,300 sequential API calls once the table got large, effectively
+    # hanging. Fixed with a small helper view (securities_with_prices,
+    # created once via the SQL below) that holds only DISTINCT
+    # security_ids -- at most ~500 rows regardless of how large
+    # market_prices grows, so this is now a single fast query instead of
+    # thousands of paginated ones.
+    #
+    # One-time setup required (run once in the SQL editor before using
+    # this script, safe to re-run):
+    #   CREATE OR REPLACE VIEW securities_with_prices AS
+    #   SELECT DISTINCT security_id FROM market_prices;
     securities = supabase.table("securities").select("ticker,id").execute().data
-    security_ids_with_prices = set()
-    offset = 0
-    while True:
-        page = supabase.table("market_prices").select("security_id") \
-            .range(offset, offset + 999).execute().data
-        if not page:
-            break
-        security_ids_with_prices.update(r["security_id"] for r in page)
-        if len(page) < 1000:
-            break
-        offset += 1000
+    priced = supabase.table("securities_with_prices").select("security_id").execute().data
+    security_ids_with_prices = {r["security_id"] for r in priced}
     return [s["ticker"] for s in securities
             if s["id"] not in security_ids_with_prices and s["ticker"] != "SPY"]
 

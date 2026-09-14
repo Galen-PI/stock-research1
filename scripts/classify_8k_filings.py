@@ -32,6 +32,37 @@ SEC-filing-convention knowledge and have not yet been verified against
 this project's actual data -- treat as a reasonable starting hypothesis,
 not confirmed fact, until spot-checked against real results.
 
+PROMPT v3 UPDATE: found via a real, extensive cross-corpus audit (not
+a hypothesis) that ATM equity program filings were being classified
+inconsistently -- the exact same $400M-$1B program size landed on BOTH
+sides of the routine/material line, across different companies AND
+within the same company at different times, with no consistent dollar
+threshold driving the difference. Root cause: the classifier wasn't
+distinguishing MECHANISM ESTABLISHMENT (an authorization, no capital
+raised yet) from ACTUAL COMPLETION (real shares sold, real proceeds).
+Added an explicit calibration note covering this for ATM programs,
+credit facility draws, and buyback authorizations -- the three most
+common cases of this same establishment-vs-completion pattern. 8 real
+misclassifications found and corrected retroactively as a result (see
+classification_corrections, error_category='atm_establishment_vs_completion').
+Real disagreement rate across everything reviewed so far (n=74): 13.5%
+-- a genuine, still-accumulating number, not a final verdict on
+overall accuracy.
+
+PROMPT v4 UPDATE: a second, LARGER instance of the same establishment-
+vs-execution pattern found via cross-corpus search: share repurchase/
+buyback AUTHORIZATIONS (not ASR agreements or completed repurchases)
+show the identical inconsistency -- estimated 249+ potentially
+misclassified rows across dozens of companies (AZO alone shows the
+verdict flip essentially at random across ~15 authorizations from
+2005-2026, no dollar threshold explains it). Added a parallel
+calibration note. Given the scale (249+, vs. 8 for the ATM case), this
+was NOT retroactively fixed in this session -- logged as a real, scoped,
+pending backlog for a future dedicated review pass, not squeezed in
+ad hoc. Credit facility amendments, by contrast, were audited across
+this same search and found to be consistently well-classified --
+no action needed there.
+
 COST NOTE: uses Haiku 4.5. Filing text is longer than news articles, so
 per-call cost is somewhat higher than Track B, but still cheap at this
 scale.
@@ -55,7 +86,7 @@ ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 MODEL_VERSION = "claude-haiku-4-5-20251001"
-PROMPT_VERSION = "v2"
+PROMPT_VERSION = "v5"
 
 SEC_HEADERS = {"User-Agent": "stock-research1 project contact@example.com"}
 
@@ -109,6 +140,88 @@ a clearly-material filing is "real_event" even if some details are missing
 (reflect that gap in confidence and reasoning, not by choosing "uncertain").
 Reserve "uncertain" for cases where you genuinely cannot tell which of the
 other two verdicts applies.
+
+CALIBRATION NOTE on establishment vs. completion (found via a real,
+extensive audit that revealed inconsistent classification of the exact
+same event type -- e.g. the same $400M-$1B ATM program size landing on
+BOTH sides of the routine/material line across different companies and
+even within the same company at different times, with NO consistent
+dollar threshold driving the difference): for financing mechanisms that
+have a distinct "authorization" phase and a distinct "actual capital
+raised/deployed" phase -- at-the-market (ATM) equity distribution
+programs, credit facility/revolver AMENDMENTS vs. actual DRAWS, share
+buyback AUTHORIZATIONS vs. actual REPURCHASES completed -- the
+ESTABLISHMENT/AUTHORIZATION of the mechanism is ROUTINE (likely_noise)
+regardless of the dollar amount, UNLESS one of these specific exceptions
+applies:
+  (a) it is the company's genuinely FIRST-EVER use of this financing
+      mechanism (a real "opening move" with narrative value for later
+      chained events, not just another renewal)
+  (b) it occurs during an already-notable market-wide crisis window
+      (e.g. the 2008-2009 financial crisis) where the act of accessing
+      capital markets at all is itself the newsworthy signal
+
+CALIBRATION NOTE on authorization vs. execution (found via the same kind of
+systematic audit that caught the ATM issue above -- this one affecting an
+estimated 249+ classifications): share repurchase/buyback AUTHORIZATIONS
+show the exact same inconsistency pattern as ATM programs did. A board
+"authorizing" a $500M-$2B buyback is discretionary and commits no capital
+immediately -- it is the establishment/authorization side of the same
+distinction. The real event is either:
+  (a) an actual ACCELERATED SHARE REPURCHASE (ASR) agreement or completed
+      repurchase -- a named counterparty, real dollars committed
+      immediately, shares actually delivered/retired
+  (b) a genuinely first-ever authorization for this company, or a
+      dramatic outlier vs. this company's own historical pattern of
+      authorizations (not just another routine renewal at a similar or
+      even larger round-number amount)
+A bare authorization announcement, even at $1B+, is likely_noise by
+default unless (a) or (b) applies. Do not use dollar amount alone to
+decide -- companies routinely re-authorize $500M-$2B+ repurchase programs
+every 6-12 months as pure housekeeping, and treating each one as material
+was found to create essentially random, inconsistent classification with
+no defensible pattern.
+
+SEC ITEM CODE REFERENCE -- a genuine, independent second signal (this is
+SEC's own real regulatory taxonomy for Form 8-K, not something inferred
+from prior review sessions). Use the filing's item_codes as a PRIOR
+alongside your reading of the actual content -- not an absolute override,
+since the source filing's own header can occasionally be mislabeled by
+the filer (found in one real case: a filing genuinely labeled "Item 2.01"
+in its header, but the actual text below it was word-for-word Item 2.03
+language -- a clerical error in the original SEC filing itself, not a
+data pipeline issue). When the codes and the actual text agree, trust
+both; when they conflict, trust the actual text.
+
+ALWAYS_MATERIAL codes (lean strongly toward real_event unless the actual
+text clearly shows otherwise): 1.03 (Bankruptcy/Receivership), 1.05
+(Material Cybersecurity Incidents), 2.01 (Completion of
+Acquisition/Disposition of Assets), 2.06 (Material Impairments), 4.02
+(Non-Reliance on Previously Issued Financial Statements), 5.01 (Changes
+in Control of Registrant), 5.06 (Change in Shell Company Status).
+
+ALWAYS_ROUTINE codes (lean strongly toward likely_noise unless the actual
+text clearly shows otherwise): 2.02 (Results of Operations/Financial
+Condition -- routine earnings releases), 5.05 (Amendment to Code of
+Ethics), 5.07 (Submission of Matters to a Vote of Security Holders --
+routine annual meeting results), 9.01 (Financial Statements and
+Exhibits -- an administrative filing-mechanics code, never material on
+its own).
+
+CONTEXT_DEPENDENT codes (the code itself carries NO signal either way --
+rely entirely on the actual filing content and the other calibration
+notes above): 1.01, 1.02, 1.04, 2.03, 2.04, 2.05, 3.01, 3.02, 3.03, 4.01,
+5.02, 5.03, 5.04, 5.08, 7.01, 8.01. Three of these were moved here from
+an initial "always material" guess after real evidence showed they
+produce far more false positives than true signal: 3.03 fires on
+completely routine preferred stock issuances (standard dividend-priority
+language legally counts as a "modification to security holder rights"
+even with zero unusual terms); 3.01 fires on brief, immediately-cured
+technical compliance gaps (e.g. a board resignation causing a 48-hour
+committee-composition deficiency, fixed same-day); 2.04 fires on standard
+cross-default clauses in otherwise-routine debt refinancing. None of
+these three should shift your verdict on their own -- read the actual
+content.
 """
 
 

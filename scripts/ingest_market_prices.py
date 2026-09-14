@@ -105,9 +105,31 @@ def upsert_prices(security_id, prices):
         ),
     }
 
+    # Real bug fixed here: Twelve Data can return more than one entry
+    # for the same date within a single request (observed on ARES and
+    # FOX -- both real companies with corporate-action history that
+    # likely triggers duplicate/recalculated rows around the event).
+    # Sending duplicate (security_id, price_date) keys in ONE upsert
+    # batch makes Postgres reject the whole batch with "ON CONFLICT DO
+    # UPDATE command cannot affect row a second time" -- it can't apply
+    # two conflicting updates to the same row in one statement. Fixed
+    # by deduplicating on price_date before building the batch, keeping
+    # the LAST entry Twelve Data returned for any repeated date (its
+    # own most-recent/most-adjusted value for that date).
+    prices_by_date = {}
+    for price in prices:
+        prices_by_date[price["datetime"]] = price
+
+    duplicate_count = len(prices) - len(prices_by_date)
+    if duplicate_count > 0:
+        print(
+            f"Note: {duplicate_count} duplicate date(s) from Twelve "
+            f"Data were collapsed to their last value before upserting."
+        )
+
     rows = []
 
-    for price in prices:
+    for price in prices_by_date.values():
 
         close = float(price["close"])
 
