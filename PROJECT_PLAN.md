@@ -266,3 +266,35 @@ Section 5's Phase 5 notes and Section 10's "immediate next steps" both previousl
 Verification query run this session: compared `abnormal_return_20d` between both views for every `financial_result` event with a match in both. Result: every comparison showed exact agreement (diff = 0.0000) except one (AMD Q3 2024, diff = 0.008), which is fully explained by the filed_date landing one calendar day after the event_date — a normal SEC filing-timing nuance, not measurement error.
 
 **Action taken:** remove this item from the "immediate next steps" list — it's done, not pending. Lesson for future sessions: verify a "known issue" against current real data before re-investigating it; documentation can silently drift out of sync with an already-applied fix.
+
+Addendum: Classification Backlog Clearance & Event Promotion Pipeline (this session)
+This session did not touch Phase 6/7/8 scoping (Sections 6, 8 above remain the current, correct plan). It addressed a much more foundational gap discovered while investigating why Phase 6's tag counts (rewarded n=52, punished n=54 per Section 5) seemed low relative to how much confirmed real-event material actually existed in filing_ai_classifications.
+
+Finding: the "not enough data" read on Phase 6 was a pipeline-throughput problem, not a data-scarcity problem. Tracing the full path end-to-end: 70,697 raw candidate filings -> 29,387+ AI-classified -> 22,720+ human-reviewed -> 11,282 confirmed real_event rows -> only 1,214 ever promoted into the actual events table. The bottleneck was a missing promotion step between "confirmed by a human" and "structured database row" -- not a shortage of underlying material.
+
+Work done this session:
+
+Cleared the human-review backlog (15,961 + a further 2,868 rows found mid-session) to zero, using an evidence-based calibration policy: measured real AI/human agreement rate per confidence+template-match bucket before trusting any bulk auto-confirm (two buckets came back at ~99-100% agreement across thousands of sampled rows and were safe to bulk-clear; everything else got individual review)
+Found corporate_action (per Section 5's 17-tag system context, a separate but related taxonomy issue) had drifted into an overloaded catch-all absorbing 2,380 mistyped rows -- restructuring, capital raises, governance actions, spinoffs, none of which its real definition covers. Added 4 new event types to event_types (capital_raise, governance_action, ipo_spinoff, restructuring) and retyped 2,522 affected rows
+Found and fixed a structural double-counting bug: NWS/NWSA (dual-class shares of the same company) file identical 8-Ks under both tickers with the same accession number, causing every News Corp filing to be fetched/classified/reviewed twice
+Built promote_events.py: turns confirmed real_event rows into actual events + event_entity_relationships + event_type_relationships rows, deduping by (filing_date, accession_number) rather than by ticker (fixes the NWS/NWSA case structurally). Duplicate detection uses same-entity + date-proximity as a heuristic, but every heuristic match gets a real LLM verification call before being trusted -- the unverified heuristic alone had a measured ~33% false-positive rate at sample scale, including one that would have silently blocked P&G's Gillette merger announcement (an event already referenced in this plan's own Section 9, Tier 1 P&G notes)
+New event_source_filings table added for traceability + idempotency -- every event now traces back to its real source filing(s), and the promotion script is safely re-runnable
+Proven safe across three real interruption types this session (manual interrupt, network connection drop, full machine restart) -- verified via integrity checks after each, zero data corruption in any case
+As of this addendum, the live promotion run is in progress: events growing from 1,214 toward an estimated 11,000+
+
+What this changes for Section 5's Phase status table:
+
+Phase 3 (Corporate Events): the ~85% figure should be revisited once the live run completes -- the event count is about to grow roughly 9x, though the underlying event quality discipline (primary-source verification, the check-and-balance architecture) is unchanged
+Phase 6 (Historical Pattern Engine): still genuinely ~15% -- this session did NOT touch the walk-forward harness, sector benchmarks, or base-rate comparison described in Section 6. What it did do is remove a real bottleneck upstream of Phase 6: once tagging (see below) catches up to the new event volume, pattern_card.py's n=30-50 checks will be running against a much larger, more representative pool than the current n=52/54 rewarded/punished figures reflect
+
+New, not-yet-started gap this session surfaced: event tagging has its own backlog. event_tag_suggestions (the AI-suggest/human-confirm pipeline analogous to filing_ai_classifications) had only 212 rows in review as of this session, against what will shortly be 11,000+ untagged events. This sits between Phase 3 and Phase 6 in the existing architecture diagram and needs the same calibration-first discipline applied to it next, before Phase 6's walk-forward harness work can proceed meaningfully.
+
+Revised Section 10 next steps, in order (supersedes the numbered list above for near-term work; Section 10's items 1, 4, 6, 7 remain valid and un-superseded):
+
+Finish the current live promotion run
+Apply calibrated tagging to the new event volume (same discipline as this session's filing-review clearance)
+Resolve remaining Phase 5 items per Section 5 (this session did not touch Phase 5)
+Re-run Phase 6's existing pattern checks against the much larger n before investing further in the walk-forward harness build-out, to confirm the larger sample actually changes which tags are viable candidates for it
+
+One new supporting script this session, in the same spirit as classify_8k_filings.py's proven check-and-balance pattern: onboard_pipeline.py chains the full company-onboarding sequence (register -> financials -> 8-K history -> prices -> classify -> calibrated auto-review -> scoped promotion) into one command, logging every step's real verification result to new onboarding_runs / onboarding_run_steps tables, so an onboarding run can be handed to someone without full project context and checked asynchronously rather than requiring live supervision. Not yet tested end-to-end on a real new company -- do that before relying on it for the Tier 2 expansion mentioned in Section 10.
+
