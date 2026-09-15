@@ -71,3 +71,5 @@ Inconsistencies get dug into, not waved off.
 Company names, CIKs, and tickers are never fabricated — always pulled from SEC's own data.
 Every bulk auto-decision policy is backed by a measured accuracy check on real data before being trusted.
 
+
+<-- caused a real 3-5x data duplication bug before this testing branches -->
