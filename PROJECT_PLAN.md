@@ -298,3 +298,59 @@ Re-run Phase 6's existing pattern checks against the much larger n before invest
 
 One new supporting script this session, in the same spirit as classify_8k_filings.py's proven check-and-balance pattern: onboard_pipeline.py chains the full company-onboarding sequence (register -> financials -> 8-K history -> prices -> classify -> calibrated auto-review -> scoped promotion) into one command, logging every step's real verification result to new onboarding_runs / onboarding_run_steps tables, so an onboarding run can be handed to someone without full project context and checked asynchronously rather than requiring live supervision. Not yet tested end-to-end on a real new company -- do that before relying on it for the Tier 2 expansion mentioned in Section 10.
 
+## Addendum 2: Event Tagging Pipeline Built and Tested (same session, continued)
+
+Follows directly from Addendum 1 (event promotion). Once promotion was live and running, this session moved to the next real gap it surfaced: ~11,255 newly-promoted events had zero tag suggestions generated at all -- `event_tag_suggestions` was untouched by the promotion work, sitting at the exact same 1,066/212/23/1 split as before promotion began.
+
+### Real current state as of this addendum
+
+- **Total events: 12,277** (up from 1,214 at session start; ~185 confirmed real_events remain genuinely unpromoted -- see "Known remaining gaps" below)
+- **Tag counts (all tags, current real totals):**
+
+| Tag | Count | Tag | Count |
+|---|---|---|---|
+| muted | 711 | multi_stage_divestiture | 88 |
+| punished | 515 | leadership_reversal | 53 |
+| rewarded | 507 | cross_entity_ripple | 52 |
+| high_confidence_causal_link | 418 | confounded_corporate_action | 47 |
+| same_entity_sequence | 397 | confounded_regulatory_action | 38 |
+| chain_position_middle | 325 | chain_position_opening | 36 |
+| confounded_macro_conditions | 163 | chain_position_closing | 36 |
+| plausible_unconfirmed | 26 | confounded_earnings | 14 |
+| explicitly_not_attributed | 8 | sentiment_reveals_distinct_driver | 8 |
+| same_industry_comparison | 7 | diverged_from_fundamentals | 6 |
+| activist_investor_campaign | 6 | sentiment_confirms_confound | 5 |
+
+**Note on reaction_character totals (muted/punished/rewarded):** these are a mix of pre-existing tags from before this session and a partial run of `tag_reaction_character.py` tonight (see "Known remaining gaps" -- the full 11,219-event backfill was still in progress as of this addendum). **Note on sentiment_* totals (13 combined):** tonight's `resolve_sentiment_confounds.py` wrote 9 of these; the remaining 4 are most likely pre-existing (these two tags were part of the original 22-tag taxonomy, not newly created tonight -- only the deterministic script to compute them was built this session). Worth a quick verification query before relying on this number, not confirmed with certainty here.
+
+### What got built and tested, in order
+
+**1. Real gap found in `suggest_event_tags.py` (pre-existing script, not built tonight):** 5 of the 22 real tags require data this script's AI-judgment prompt never provides:
+- `chain_position_opening/middle/closing` -- deterministic facts about event ORDER within a `same_entity_sequence` chain, not a text-judgment call
+- `sentiment_confirms_confound`/`sentiment_reveals_distinct_driver` -- explicitly require `company_sentiment_timeline` data per their own descriptions, never included in the prompt
+
+Fixed by excluding all 5 from the AI's tag list (`NOT_AI_SUGGESTABLE` set), so the AI can no longer be asked to guess at facts it structurally cannot know.
+
+**2. Built `compute_chain_position.py`** -- fully deterministic, no AI call. Sorts each entity's `same_entity_sequence`-tagged events chronologically, tags first as opening, last as closing, everything between as middle. Companies with only 1 sequence event get no position tag (no real "position" exists with just one link). Result: 397 real tags across 37 valid multi-event chains (2 entities skipped, only 1 sequence event each). Handles shared events (linked to 2+ companies) correctly -- verified that 2 such events received exactly one row per matching position, not duplicated, confirming the `(event_id, tag_id)` primary key dedupes correctly across independently-computed chains.
+
+**3. Built `suggest_event_tags_batch.py`** -- Batch API version of the AI-suggestion script (same reasoning as `classify_8k_filings_batch_v2.py`'s rebuild: the original made one synchronous call per event with no cost visibility, unworkable at 11,255-event scale). Same prompt, same calibration notes, same `NOT_AI_SUGGESTABLE` exclusion, same staging-table-only write pattern.
+
+**4. Real calibration testing before trusting it at scale (same discipline as filing classification):** tested against 3 companies with deliberately different event-writing styles -- AAPL (narrative/editorialized titles, leadership-succession-dense), EXC (procedural/regulatory titles), XOM (litigation-heavy). 107 total `same_entity_sequence` suggestions read by hand. Found 4 real misses (generic "multi-year trend" claims treated as documented chains, and 2 cases where the AI's own reasoning explicitly stated no textual link existed yet applied the tag anyway) -- 3 of 4 already caught by the existing confidence<0.75 auto-flag; 1 (AAPL, confidence 0.85) would have silently slipped through.
+
+**5. Fix: raised the auto-flag threshold specifically for `same_entity_sequence` to 0.87** (not a blanket change to all tags -- the other 106 suggestions across all 3 companies were well-justified even down to 0.65-0.72, so a blanket hike would have over-flagged genuinely good suggestions for no benefit). Retroactively re-flagged the one already-written miss below the new threshold.
+
+**6. Built `resolve_sentiment_confounds.py`** for the 2 remaining excluded tags. Real design decision made deliberately (not defaulting to a market-wide average for simplicity): a genuine sector baseline requires multiple same-sector companies with sentiment data, or "divergence" just measures noise between 1-2 companies. Real check of current data: only Information Technology (AAPL/AMD/MSFT/NVDA, 4 companies) and Energy (XOM/CVX, 2 companies) have any multi-company sentiment coverage at all -- every other sector has exactly 1 company. Script **dynamically discovers** which sectors qualify (minimum 3 total companies = 2+ real peers) every run, rather than hardcoding a list -- this was itself a real fix made mid-session after a first version with a hardcoded 2-sector list produced a weak result for Energy (both XOM and CVX got tagged "diverged" from each other during the COVID crash, which is a shaky conclusion from a 2-company/1-peer comparison). After the fix, Energy correctly auto-excludes itself (prints `[SKIP SECTOR]` with the real reason) and will automatically start qualifying once a 3rd Energy company gets sentiment data -- no code change needed later. Went live on Information Technology only: 9 real tags written.
+
+**7. Found and fixed a real bug in `tag_reaction_character.py` (pre-existing script, not built tonight):** `get_untagged_events()`'s `event_entity_relationships` query had no pagination, silently capped at Supabase's default 1,000-row limit -- with 12,000+ real rows in that table now, this caused the script to report only 70 events needing tags instead of the real ~11,567. Same bug class already documented elsewhere in this project's history (`classify_8k_filings.py`'s resumability check hit the identical 1,000-row cap). Fixed with the same `.range()` pagination pattern used elsewhere. First (buggy) run before the fix legitimately tagged 62 real events with real price data before being caught -- no data damage, just an incomplete backlog view. After the fix, correctly found 11,219 real events needing tags; full backfill was running in the background as of this addendum.
+
+### Known remaining gaps (honest, as of this addendum)
+
+- **~185 confirmed real_events genuinely unpromoted.** Down from the original 328 found post-live-run; a further pass created 142 more, leaving primarily the ~46 rows with no resolvable `event_type` (need manual/AI assignment before they can ever be promoted) plus legitimate confirmed-duplicate skips.
+- **`tag_reaction_character.py`'s full 11,219-event backfill** was still running as of this addendum -- the `rewarded`/`punished`/`muted` counts in the table above are a partial snapshot, not final.
+- **`suggest_event_tags_batch.py`'s chained 66-ticker run** (budget-scoped to ~$1.80 of a $1.87 remaining balance, smallest-tickers-first) was also still running as of this addendum -- most of the 11,255-event AI-suggestion backlog remains unprocessed, gated on both this run finishing and a further budget refill for the rest.
+- **`sentiment_*` tags remain scoped to Information Technology only** -- by design, not oversight. Will expand automatically as more same-sector companies get sentiment data (ties to the real Section 9 GICS Tier 2 expansion plan).
+- **The `event_tag_suggestions` review queue** (17 flagged in the AAPL test batch, 46 in EXC's, etc.) has not yet been worked through with the same calibration-policy discipline used for `filing_ai_classifications` earlier this session. That's the natural next step once suggestion generation finishes.
+
+### Readiness note for Phase 7/8
+
+Per Section 6 and 8 of the real project plan, Phase 8 (autotrader/backtest environment) is explicitly gated on Phases 1-7 being genuinely, not approximately, trustworthy -- and specifically on a tag surviving the walk-forward evaluation harness described in Section 6, which remains unbuilt. Tonight's work is real, substantial progress on Phase 3 (event volume, corrected taxonomy) and the tagging layer that feeds Phase 6 -- but it does NOT itself constitute Phase 6 completion. The honest sequence before Phase 7/8 planning should resume in earnest: finish the two backlogs above, work the tag-suggestion review queue, re-run Phase 5's price-reaction linking against the full new event volume, and only then revisit whether `pattern_card.py`'s sector-benchmark/base-rate/walk-forward gaps are worth building out now that n has grown substantially across most tag categories.

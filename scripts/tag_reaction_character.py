@@ -109,7 +109,7 @@ def get_untagged_events(ticker_filter: str = None) -> list[dict]:
             break
         offset += page_size
 
-    eer_query = supabase.table("event_entity_relationships").select("event_id,entity_id")
+        eer_query = supabase.table("event_entity_relationships").select("event_id,entity_id")
     if ticker_filter:
         sec = supabase.table("securities").select("entity_id").eq("ticker", ticker_filter).execute().data
         if not sec:
@@ -117,7 +117,17 @@ def get_untagged_events(ticker_filter: str = None) -> list[dict]:
             return []
         entity_id = sec[0]["entity_id"]
         eer_query = eer_query.eq("entity_id", entity_id)
-    eer_rows = eer_query.execute().data
+
+    eer_rows = []
+    offset = 0
+    while True:
+        page = eer_query.range(offset, offset + 999).execute().data
+        if not page:
+            break
+        eer_rows.extend(page)
+        if len(page) < 1000:
+            break
+        offset += 1000
 
     event_ids = sorted({r["event_id"] for r in eer_rows} - already_tagged)
     if not event_ids:

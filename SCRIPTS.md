@@ -131,3 +131,68 @@ Twelve Data 429s get worse, not better, with more parallel terminals hitting it 
 entities.ticker is sparsely populated — don't assume it's always set. The authoritative ticker for an entity is securities.ticker (joined via securities.entity_id), which is always populated. A NULL in entities.ticker does not mean the entity/event linkage is broken.
 NWS and NWSA (News Corp's dual-class shares) file identical 8-Ks under both tickers with the same accession number — any per-ticker counting logic will double-count these unless explicitly deduped by (filing_date, accession_number) instead of by ticker.
 
+## Addendum: Event Promotion + Tagging Pipeline Scripts (this session)
+
+These sit downstream of Part 1 (Company Onboarding) -- they operate on `filing_ai_classifications` rows already reviewed/confirmed and on the `events` table, not on raw filings.
+
+### Promote confirmed real_events into actual `events` rows
+
+```bash
+python scripts/promote_events.py                              # dry run
+python scripts/promote_events.py --live                        # writes
+python scripts/promote_events.py --live --ticker TICKER        # scoped to one company (use for onboarding)
+python scripts/promote_events.py --live --limit 50              # cap, for testing
+```
+
+Groups confirmed `real_event` rows by `(filing_date, accession_number)` -- collapses dual-ticker filings (NWS/NWSA file identical 8-Ks under both tickers, same accession number) into one event instead of creating duplicates. Duplicate check is two-stage: (1) heuristic -- same entity, event_date within ±14 days of an existing event; (2) a **real LLM verification call on every heuristic match** before trusting it as a genuine duplicate -- the heuristic alone had a measured ~33% false-positive rate at sample scale, including one that would have silently blocked a real, major event. Tracks promotion via `event_source_filings` (ticker, filing_date, accession_number -> event_id) for idempotency and traceability -- safe to re-run, already-promoted filings automatically skip.
+
+**Proven safe across three real interruption types** (manual Ctrl+C, network connection drop mid-write, full machine restart) -- verified via integrity checks after each (checking for events missing a type link, entity link, or with a genuine new incomplete row), zero data corruption found in any case. Given this, a long-running promotion pass is best wrapped in an auto-restart loop:
+```bash
+until python scripts/promote_events.py --live; do
+    echo "Crashed -- restarting in 10 seconds..."
+    sleep 10
+done
+echo "Finished successfully."
+```
+
+Known slow/silent point: the "Loading existing events for duplicate-checking" phase, for tickers with a dense existing filing history (XOM, GE, PG, AEP), can take a long while with zero visible progress -- this is normal, not a hang. Verify real progress via `SELECT COUNT(*) FROM event_source_filings;` in a separate query rather than assuming the terminal is stuck.
+
+### Deterministic (non-AI) tag computation
+
+**`compute_chain_position.py`** -- computes `chain_position_opening/middle/closing`, a purely deterministic fact about event ORDER within a `same_entity_sequence` chain, not something an AI should guess from a single event's text.
+```bash
+python scripts/compute_chain_position.py              # all companies
+python scripts/compute_chain_position.py TICKER        # one company
+python scripts/compute_chain_position.py --dry-run     # print, don't write
+```
+
+**`resolve_sentiment_confounds.py`** -- computes `sentiment_confirms_confound`/`sentiment_reveals_distinct_driver` from real `company_sentiment_timeline` data vs. a same-sector peer baseline. **Dynamically discovers which sectors currently have enough real peer coverage** (default: 2+ other same-sector companies with sentiment data) rather than trusting a hardcoded list -- prints `[SKIP SECTOR]` with the real reason for any sector that doesn't qualify yet, and will automatically start including a sector once real onboarding work brings enough same-sector companies online. Never lower `--min-peers` below 2 without a real reason; a 1-peer "baseline" measures noise between two companies, not genuine divergence (this was tested and found true for Energy specifically before the dynamic-discovery fix was added).
+```bash
+python scripts/resolve_sentiment_confounds.py           # dry run
+python scripts/resolve_sentiment_confounds.py --live    # writes
+```
+
+### AI-suggested tags (staging only, human confirmation required)
+
+**`suggest_event_tags_batch.py`** -- Batch API version of the original `suggest_event_tags.py` (necessary at scale: the original makes one synchronous call per event, unworkable against 11,000+ events with zero pre-flight cost visibility). Writes ONLY to `event_tag_suggestions`, same check-and-balance pattern as the filing classifier -- nothing auto-applies to `event_tags`.
+```bash
+python scripts/suggest_event_tags_batch.py              # all untagged/unsuggested events
+python scripts/suggest_event_tags_batch.py TICKER        # one ticker
+python scripts/suggest_event_tags_batch.py --yes          # skip confirmation prompt (for chained runs)
+```
+
+Both suggestion scripts exclude 5 tags from the AI's options (`chain_position_*`, `sentiment_*`) -- these require data (event order, sentiment timeline) the AI-judgment prompt never provides; they're computed by the two deterministic scripts above instead.
+
+**Calibration note, from real testing (107 suggestions read by hand across 3 differently-styled companies):** `same_entity_sequence` needed a stricter auto-flag threshold (0.87, not the general 0.75) after finding it can produce a genuine miss (a vague "multi-year trend" claim treated as a documented connected chain) at confidence as high as 0.85. Every other tested tag's misses landed below 0.75 and were already caught by the general threshold -- don't blanket-raise the threshold for all tags, since the vast majority of 0.72-0.85 suggestions across all 3 test companies were genuinely well-justified.
+
+Chaining many small tickers to fit a budget:
+```bash
+for ticker in TICKER1 TICKER2 TICKER3; do
+    echo "=== Starting $ticker ==="
+    python scripts/suggest_event_tags_batch.py "$ticker" --yes
+done
+```
+
+### `tag_reaction_character.py` -- real bug found and fixed this session
+
+This pre-existing script's `get_untagged_events()` had an unpaginated `event_entity_relationships` query -- silently capped at Supabase's default 1,000-row limit once that table grew past it (12,000+ rows now), causing it to report only ~70 events needing tags instead of the real ~11,500+. Same bug class as a previously-documented issue in `classify_8k_filings.py`'s resumability check. Fixed with the standard `.range()` pagination loop. **If this script ever again reports a suspiciously small "Found N events" count relative to known total event volume, check this exact function first before trusting the number.**

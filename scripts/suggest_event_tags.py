@@ -29,9 +29,21 @@ MODEL_VERSION = "claude-haiku-4-5-20251001"
 PROMPT_VERSION = "v2"
 
 
+# These tags require data suggest_event_tags.py never gives the AI --
+# chain_position_* is a deterministic fact computable from the database
+# (event order within a same_entity_sequence chain), not a text-judgment
+# call, and sentiment_* explicitly requires company_sentiment_timeline
+# data that this script's prompt never includes. Both are handled by
+# dedicated scripts instead -- see compute_chain_position.py.
+NOT_AI_SUGGESTABLE = {
+    "chain_position_opening", "chain_position_middle", "chain_position_closing",
+    "sentiment_confirms_confound", "sentiment_reveals_distinct_driver",
+}
+
+
 def get_all_tags() -> dict:
     tags = supabase.table("tags").select("name,tier1_category,description").execute().data
-    return {t["name"]: t for t in tags}
+    return {t["name"]: t for t in tags if t["name"] not in NOT_AI_SUGGESTABLE}
 
 
 def get_events_needing_tags(ticker_filter: str = None) -> list[dict]:
@@ -124,10 +136,24 @@ Do not suggest reaction_character tags (rewarded/punished/muted/diverged_from_fu
                   "reasoning": f"MALFORMED API RESPONSE: {raw_text[:300]}"}]
 
 
+# same_entity_sequence needs a higher bar than other tags: real testing
+# found it can land a genuine miss (a vague "multi-year trend" claim
+# treated as a documented connected chain) at confidence as high as
+# 0.85, which the general 0.75 threshold would let through unreviewed.
+# Everything else tested (107 suggestions across 3 differently-styled
+# companies) showed misses only below 0.75, so only this tag gets the
+# stricter bar -- raising it for every tag would over-flag many
+# genuinely well-justified 0.75-0.87 suggestions for no real benefit.
+STRICTER_THRESHOLD_TAGS = {
+    "same_entity_sequence": 0.87,
+}
+
+
 def compute_flag(confidence: float, tag_name: str, all_tags: dict) -> tuple[bool, str]:
     if tag_name not in all_tags:
         return True, "invalid_tag_name"
-    if confidence < 0.75:
+    required_confidence = STRICTER_THRESHOLD_TAGS.get(tag_name, 0.75)
+    if confidence < required_confidence:
         return True, "low_confidence"
     if random.random() < 0.10:
         return True, "random_audit_sample"
