@@ -358,10 +358,16 @@ def tag_one(event_id: str, override_date: str, window_days: int, dry_run: bool):
 
     if not dry_run:
         tag_ids = {name: get_tag_id(name) for name in ["rewarded", "punished", "muted"]}
-        supabase.table("event_tags").upsert({
+        # Remove any existing reaction-character tag for this event first --
+        # these three are mutually exclusive, and upsert on (event_id, tag_id)
+        # won't catch a *changed* classification since the tag_id itself differs.
+        supabase.table("event_tags").delete() \
+            .eq("event_id", event_id) \
+            .in_("tag_id", list(tag_ids.values())).execute()
+        supabase.table("event_tags").insert({
             "event_id": event_id,
             "tag_id": tag_ids[reaction],
-        }, on_conflict="event_id,tag_id").execute()
+        }).execute()
         full = compute_full_reaction(ticker, override_date, title, event_id)
         if full:
             print(f"  (tagged + magnitude saved: 20d abnormal {full['abnormal_return_20d']*100:+.2f}%)")
@@ -496,10 +502,13 @@ def main():
         print(f"  {reaction.upper():9s} {ticker:6s} {event_date}  {pct:+.1f}%  {e['title'][:60]}")
 
         if not dry_run:
-            supabase.table("event_tags").upsert({
+            supabase.table("event_tags").delete() \
+                .eq("event_id", e["id"]) \
+                .in_("tag_id", list(tag_ids.values())).execute()
+            supabase.table("event_tags").insert({
                 "event_id": e["id"],
                 "tag_id": tag_ids[reaction],
-            }, on_conflict="event_id,tag_id").execute()
+            }).execute()
             full = compute_full_reaction(ticker, event_date, e["title"], e["id"])
             if full:
                 magnitude_saved_count += 1

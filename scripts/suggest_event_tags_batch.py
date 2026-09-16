@@ -50,9 +50,16 @@ ANTHROPIC_HEADERS = {
 
 # Same exclusion as the fixed suggest_event_tags.py -- these require
 # data this script's prompt never provides (event order, sentiment data).
+# reaction_character tags (rewarded/punished/muted/diverged_from_fundamentals)
+# are supposed to be excluded by the prompt's explicit instruction alone --
+# but real output showed the AI ignoring that instruction twice (suggesting
+# "punished" despite being told not to). Same lesson as chain_position_*/
+# sentiment_*: a soft prompt instruction isn't reliable enough on its own
+# when a hard exclusion from the tag list costs nothing and guarantees it.
 NOT_AI_SUGGESTABLE = {
     "chain_position_opening", "chain_position_middle", "chain_position_closing",
     "sentiment_confirms_confound", "sentiment_reveals_distinct_driver",
+    "rewarded", "punished", "muted", "diverged_from_fundamentals",
 }
 
 
@@ -108,7 +115,11 @@ def get_events_needing_tags(ticker_filter: str = None) -> list[dict]:
     return [e for e in events if e["id"] not in already_suggested]
 
 
-def build_prompt(title: str, description: str, all_tags: dict) -> str:
+def build_static_system_prompt(all_tags: dict) -> str:
+    """Everything that's IDENTICAL across every request -- tag definitions,
+    calibration notes, response format instructions. This is the part
+    that benefits from cache_control, since it's the same on every one
+    of thousands of requests in a run."""
     tag_list_block = "\n".join(
         f"- {name} ({info['tier1_category']}): {info['description']}"
         for name, info in all_tags.items()
@@ -120,11 +131,10 @@ AVAILABLE TAGS:
 
 CRITICAL CALIBRATION NOTES (from real over-application found in testing):
 - same_entity_sequence requires a genuinely DOCUMENTED, CONNECTED chain -- e.g. the same person appearing in two roles across time (a CFO returning years later, a COO promoted to CEO), or an explicit textual link like "following the prior merger" or "the first step in a multi-year transition." A routine, isolated leadership change at a company that has OTHER unrelated leadership changes does NOT qualify just because they're the same company -- there must be a specific, stated connection between THIS event and another SPECIFIC prior/later event.
-- confounded_corporate_action should NOT be applied to every corporate action by default. It requires a SPECIFIC other concurrent event or disclosure bundled in the SAME filing or SAME narrow time window that genuinely muddies attribution -- not a generic "any price move near this date could theoretically have other causes" argument, which is true of almost everything and therefore not a useful signal.
+- confounded_corporate_action should NOT be applied to every corporate action by default. It requires a SPECIFIC OTHER concurrent event or disclosure bundled in the SAME filing or SAME narrow time window that genuinely muddies attribution -- not a generic "any price move near this date could theoretically have other causes" argument. Critically: do NOT apply this tag to an event that IS ITSELF the corporate action (a spin-off announcement, a listing transfer) -- that's a category error, not a confound. The confound must come from something ELSE happening alongside it.
+- This same standard applies to confounded_earnings, confounded_macro_conditions, and confounded_regulatory_action: each requires a SPECIFIC named concurrent event, dollar figure, or bundled disclosure -- not speculative hedging language like "may have," "would likely," "potentially," or "if [X] occurred in the same period." If your own reasoning uses hedging language like this, do not apply the tag -- that hedging is itself a sign the evidence isn't there.
+- explicitly_not_attributed requires a DIRECTLY CITED, explicit alternative attribution the source material actually states (e.g. a company explicitly saying a charge/decision was driven by named operational factors) -- not your own speculation about what the market's attribution "would likely" be. If you're guessing what investors would probably attribute a reaction to, that is NOT explicitly_not_attributed -- suggest no tag instead.
 - When in doubt, suggest NO tag rather than a low-confidence one. An empty array is a valid, often correct response.
-
-EVENT TITLE: {title}
-EVENT DESCRIPTION: {description[:2000] if description else ""}
 
 Respond with ONLY a valid JSON array, no markdown fences, no other text. Each element:
 {{"tag": "<exact tag name from the list above>", "confidence": <float 0-1>, "reasoning": "<1-2 sentences citing specific event content, including which OTHER specific event connects if suggesting same_entity_sequence>"}}
@@ -133,17 +143,29 @@ If NO tags genuinely apply, respond with an empty array: []
 Do not suggest reaction_character tags (rewarded/punished/muted/diverged_from_fundamentals) -- those require actual price data, not text analysis."""
 
 
-def build_batch_request(event: dict, all_tags: dict) -> dict:
+def build_dynamic_user_prompt(title: str, description: str) -> str:
+    """The part that's DIFFERENT on every request -- never cached."""
+    return f"""EVENT TITLE: {title}
+EVENT DESCRIPTION: {description[:2000] if description else ""}"""
+
+
+def build_batch_request(event: dict, static_system_prompt: str) -> dict:
     return {
         "custom_id": event["id"],
         "params": {
             "model": MODEL_VERSION,
             "max_tokens": 1000,
+            "system": [
+                {
+                    "type": "text",
+                    "text": static_system_prompt,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
             "messages": [{"role": "user",
-                          "content": build_prompt(event["title"], event.get("description") or "", all_tags)}],
+                          "content": build_dynamic_user_prompt(event["title"], event.get("description") or "")}],
         },
     }
-
 
 def compute_flag(confidence: float, tag_name: str, all_tags: dict) -> tuple[bool, str]:
     if tag_name not in all_tags:
@@ -234,7 +256,8 @@ def main():
     if not events:
         return
 
-    requests_list = [build_batch_request(e, all_tags) for e in events]
+    static_system_prompt = build_static_system_prompt(all_tags)
+    requests_list = [build_batch_request(e, static_system_prompt) for e in events]
     event_by_id = {e["id"]: e for e in events}
 
     est_input_tokens = sum(len(r["params"]["messages"][0]["content"]) for r in requests_list) / 4
