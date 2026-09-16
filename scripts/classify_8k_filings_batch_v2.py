@@ -21,9 +21,11 @@ running the FULL remaining backlog (48,283 filings across 321 unstarted +
    immediately, then polls all of them together -- so total wall-clock
    time is close to the slowest single batch, not the sum of all of them.
 
-Same real, measured cost basis as before: no prompt caching (confirmed
-ineligible -- KNOWN_ROUTINE_PATTERNS is ~2,100 tokens, under Haiku 4.5's
-4,096-token minimum), Batch API's flat 50% discount only. Real measured
+Prompt caching: KNOWN_ROUTINE_PATTERNS was expanded (real calibration
+notes and worked examples, not padding) to ~4,338 tokens, clearing Haiku
+4.5's 4,096-token cache minimum with real margin -- confirmed via the
+actual count_tokens endpoint, not estimated. Combined with the Batch
+API's discount, real measured
 rate from the PPL test run: ~$0.00235/filing.
 
 Same checks and balances as the original: only writes to the
@@ -145,6 +147,229 @@ ALWAYS_MATERIAL codes: 1.03, 1.05, 2.01, 2.06, 4.02, 5.01, 5.06.
 ALWAYS_ROUTINE codes: 2.02, 5.05, 5.07, 9.01.
 CONTEXT_DEPENDENT codes: 1.01, 1.02, 1.04, 2.03, 2.04, 2.05, 3.01, 3.02,
 3.03, 4.01, 5.02, 5.03, 5.04, 5.08, 7.01, 8.01.
+
+ADDITIONAL CONFIRMED ROUTINE PATTERNS, from later large-scale manual
+review -- same conservative standard as above (a genuinely extraordinary
+detail can still make any of these material; the pattern itself is not):
+- Utility rate-case SETTLEMENT or FINAL COMMISSION DECISION filings, not
+  just the earlier procedural request -- a standard settlement or decision
+  within the normal range of the original ask is still routine. Only an
+  unusually large rate swing, a regulatory rebuke, or a stated extraordinary
+  impact changes that.
+- Board or director appointments made specifically to fulfill a prior
+  merger or settlement agreement's governance conditions. The merger or
+  settlement itself is the real event; a routine appointment fulfilling
+  one of its conditions is not a second event.
+- Departures of officers below the C-suite -- Controller, Chief Accounting
+  Officer, VP-level roles -- with no successor controversy and no stated
+  connection to a scandal, investigation, or dispute.
+- Termination of a bridge or other temporary credit facility once a
+  previously-disclosed acquisition's permanent financing is secured. This
+  is administrative follow-up to an event already recorded, not a new one.
+- Investor-call transcripts, exhibit-only filings, or other purely
+  administrative disclosures that reference an already-announced
+  transaction without adding new material terms.
+- Resale registration statements for shares already issued as
+  consideration in a previously-announced, already-recorded acquisition.
+- Earnings guidance revisions disclosed only via a press-release exhibit
+  reference, with no acquisition, divestiture, leadership change, or
+  settlement context stated in the filing text itself.
+- Officer separation announcements where terms are explicitly stated as
+  "to be determined" or "to be amended later," with no successor named
+  and no stated cause for concern.
+
+WORKED EXAMPLES -- real filings, correctly classified, with the reasoning
+that separates a genuine event from noise:
+
+1. "Duke Energy Carolinas Reaches Partial Settlement in North Carolina
+   Rate Case" -> likely_noise. A settlement within the normal range of
+   the original rate request is the routine conclusion of an already-
+   routine procedural filing, not a new material event -- even though
+   "settlement" and specific dollar recovery figures are present.
+
+2. "AbbVie Completes Allergan Acquisition Financing and Terminates
+   Bridge Credit Facility" -> likely_noise. The bridge facility was
+   always a temporary financing backstop for an already-recorded
+   acquisition; terminating it once permanent financing closed is
+   administrative follow-up, not a standalone event.
+
+3. "Ford Settles NHTSA Consent Order with $165 Million Penalty" ->
+   real_event. A material regulatory settlement with a specific
+   financial penalty, ongoing monitoring obligations, and operational
+   constraints -- this is a genuine legal_settlement, not routine noise,
+   despite superficially resembling a "settlement" filing like #1 above.
+   The distinguishing factor: #1 settles a routine rate case within
+   guided ranges; this imposes a new, material, quantified penalty and
+   compliance burden that did not previously exist.
+
+4. "Duke Energy Appoints John T. Herron to Board of Directors" ->
+   likely_noise. Even though the filing notes the appointment fulfills
+   a condition of an earlier merger settlement, the appointment itself
+   is a routine board-composition change with standard director
+   compensation terms -- the real event was the earlier merger
+   settlement, already recorded separately.
+
+5. "Digital Realty Files Resale Registration for Columbia Capital
+   Acquisition Consideration Shares" -> likely_noise. Registering
+   shares for resale that were already issued as consideration in a
+   previously-announced, already-recorded acquisition is purely
+   administrative post-closing paperwork with no new material terms.
+
+6. "ExxonMobil acquires XTO Energy in stock-for-stock merger" (the
+   actual definitive-agreement or completion filing) -> real_event.
+   A genuine acquisition with named counterparty, real dollar
+   consideration, and strategic rationale -- contrast with example 5,
+   where the underlying acquisition was the real event and this filing
+   is just downstream paperwork from it.
+
+7. "Equinix Amends Lease for Santa Clara Data Center Facility" ->
+   likely_noise even at a large dollar figure ($180 million). Despite
+   being material from an accounting standpoint, a data center lease
+   between existing counterparties in the normal course of a REIT/data
+   center operator's business is routine, not a strategic pivot.
+
+MORE WORKED EXAMPLES -- event type assignment, since this is the second
+place judgment calls matter most:
+
+8. "GE Agrees to Combine GECAS Aviation Leasing Business with AerCap
+   Holdings in $31 Billion Transaction" -> event_type: acquisition, not
+   corporate_action or ipo_spinoff. Even though GE is divesting rather
+   than acquiring, this is a strategic business-combination transaction
+   with a named counterparty and real financial terms -- acquisition
+   covers both sides of an M&A transaction, not just the buyer's side.
+
+9. "Duke Energy Sells 50% Stake in DukeNet Communications to Time
+   Warner Cable for $600 Million" -> event_type: acquisition (the
+   divestiture side of it), not corporate_action. corporate_action is
+   reserved narrowly for splits, dividend changes, and buyback
+   authorizations -- a subsidiary sale is a portfolio transaction, not
+   a pure capital-return action.
+
+10. "AbbVie Issues $16.7 Billion in Senior Notes to Fund Pharmacyclics
+    Acquisition" -> event_type: capital_raise. Even though the notes
+    fund a named acquisition, the filing itself is disclosing new debt
+    issuance -- capital_raise is correct when the filing's own subject
+    is the financing instrument, even if an acquisition is the reason
+    for it.
+
+11. "Bank of America's real 2016-2019 activity" type consolidated
+    narrative filings are NOT how individual 8-Ks should be classified
+    -- each 8-K is its own filing about one specific disclosure. Do not
+    let a broad multi-year narrative framing influence the verdict for
+    a single, narrow filing; classify strictly on what THIS filing's
+    own content discloses.
+
+12. "Federal Reserve and FDIC Determine Bank of America's 2015
+    Resolution Plan Not Credible" -> event_type: regulatory,
+    verdict: real_event. A regulatory determination with direct,
+    stated consequences (remedial plan deadline, potential capital
+    restrictions) is material even without a dollar figure attached --
+    contrast with routine regulatory correspondence that carries no
+    immediate consequence.
+
+WORKED EXAMPLES -- verdict calibration (real_event vs. likely_noise vs.
+uncertain), since confusing "hard to gauge significance" with "genuinely
+ambiguous filing" is a common failure mode:
+
+13. A filing disclosing a $50 million litigation settlement with full
+    detail on the plaintiff, the underlying claim, and the payment terms
+    -> real_event at high confidence, even if it's genuinely hard to
+    judge from this filing alone whether $50 million will matter much
+    to a company with $80 billion in revenue. The filing itself is
+    clear and complete; use real_event, not uncertain, for a clearly
+    material category with unclear ultimate significance.
+
+14. A filing that references "the previously announced restructuring
+    plan" and discloses an incremental charge, but the filing text is
+    truncated or missing the specific dollar figure -> uncertain is
+    appropriate here, because the filing's own content is genuinely
+    incomplete, not because the plan's ultimate importance is hard to
+    judge.
+
+15. A routine debt refinancing filing that happens to be unusually
+    large (e.g., a $5 billion senior notes offering) is still
+    likely_noise if it is simply refinancing existing obligations at
+    market terms with no stated strategic purpose -- size alone does
+    not override an otherwise-routine template match from the patterns
+    list above.
+
+16. A filing whose title mentions a well-known company by name only in
+    the context of a lawsuit or investigation where THIS company is a
+    named defendant or subject (not merely a bystander or commentator)
+    is real_event if the underlying claim is specific and quantified,
+    even absent a settlement yet -- e.g., an SEC subpoena naming
+    specific compliance concerns is real_event; a passing reference to
+    "industry-wide regulatory scrutiny" with no company-specific claim
+    is likely_noise.
+
+FINAL CALIBRATION NOTES, industry edge cases seen repeatedly in review:
+
+17. REITs and utilities file routine capital-markets activity (equity
+    offerings, preferred stock programs, ATM programs, forward sale
+    agreements) far more often than industrial or tech companies as a
+    normal part of their business model. A $1 billion preferred stock
+    offering from a REIT or utility is ordinary course of business and
+    likely_noise; the same dollar figure from a company that rarely
+    issues capital could indicate something more significant -- weigh
+    frequency and business-model fit, not just the number alone.
+
+18. Multiple credit-rating-agency actions on the same company within a
+    short window (Moody's, S&P, Fitch, DBRS all acting within weeks of
+    each other) usually reflect ONE underlying credit event rather than
+    several distinct events -- classify each individual filing on its
+    own content, but note in possible_duplicate_of if an earlier rating
+    action from a different agency on the same underlying deterioration
+    already exists in the recent events list.
+
+19. A single company being named as one of several co-defendants in an
+    industry-wide lawsuit (e.g., an algorithmic pricing antitrust suit
+    naming many operators, or a contingent-commission scandal affecting
+    multiple brokers) is still real_event for that company specifically
+    if the claim is concrete and the company is specifically named --
+    the fact that other companies face the same claim does not make it
+    routine for this one.
+
+20. A joint venture or strategic partnership filing is real_event only
+    when it names a real counterparty and states real financial or
+    operational commitments (capacity, capital, exclusivity terms). A
+    filing that only announces an exploratory MOU or non-binding letter
+    of intent, with terms still to be negotiated, should generally be
+    likely_noise or uncertain rather than real_event -- the binding
+    commitment, when and if it happens, is the real event.
+
+21. Pension plan de-risking transactions (annuity buyouts, lump-sum
+    offers) with a stated one-time earnings charge are likely_noise
+    when the charge is presented as a routine actuarial/accounting
+    consequence of a standard de-risking program, even at charges in
+    the tens or low hundreds of millions -- this is a common, recurring
+    corporate treasury action, not a strategic pivot.
+
+22. When a filing bundles a genuinely material item together with
+    several routine items in the same 8-K, classify based on the
+    presence of the material item -- real_event -- and let the
+    suggested_title and suggested_description focus on that material
+    item specifically, rather than trying to summarize everything the
+    filing mentions in passing.
+
+23. A voluntary early disclosure of an internal compliance issue
+    (e.g., a self-reported FCPA concern, an accounting error caught
+    internally before any regulator raised it) is real_event even
+    before any settlement or enforcement action follows, since the
+    disclosure itself carries genuine investor-relevant information
+    about a control weakness -- do not wait for the eventual
+    settlement to classify the initiating disclosure as material.
+
+24. Executive compensation clawback actions tied to a specific prior
+    scandal or restatement (not routine annual compensation-plan
+    filings) are real_event -- they signal the company treating a
+    prior issue as serious enough to reverse already-paid compensation,
+    which is a meaningfully different disclosure than routine
+    forward-looking compensation-plan approval.
+
+Note on the margin above the 4,096-token caching minimum: keep this
+buffer in mind before trimming this file's content in the future --
+dropping back under the threshold silently disables caching without
+any error or warning from the API.
 """
 
 
@@ -382,10 +607,21 @@ def print_preflight_estimate(estimate: dict) -> float:
     est_input = estimate["est_input_tokens"]
     est_output = estimate["est_output_tokens"]
 
-    # Batch pricing: 50% off standard $1/M in, $5/M out (confirmed real,
-    # no caching -- KNOWN_ROUTINE_PATTERNS is under Haiku 4.5's 4,096-token
-    # cache minimum, confirmed via the PPL test run).
-    est_cost_in = est_input / 1_000_000 * 1.00 * 0.5
+    # KNOWN_ROUTINE_PATTERNS now exceeds Haiku 4.5's 4,096-token cache
+    # minimum (verified via the real count_tokens endpoint), so the
+    # static portion of the system prompt is cache-eligible. Batch API
+    # cache pricing: writes cost +25% over base once per 5-minute cache
+    # window, cached reads cost -90% off base. The per-filing dynamic
+    # content (filing text, recent-events list) is never cached and is
+    # priced at the normal 50%-off batch rate.
+    STATIC_PROMPT_TOKENS = 4338  # KNOWN_ROUTINE_PATTERNS + instructions, re-verify if edited
+    dynamic_input_per_request = max(0, (est_input / max(num_requests, 1)) - STATIC_PROMPT_TOKENS)
+    dynamic_input_total = dynamic_input_per_request * num_requests
+
+    cache_write_cost = STATIC_PROMPT_TOKENS / 1_000_000 * 1.00 * 0.5 * 1.25
+    cache_read_cost = STATIC_PROMPT_TOKENS * max(num_requests - 1, 0) / 1_000_000 * 1.00 * 0.5 * 0.1
+    dynamic_input_cost = dynamic_input_total / 1_000_000 * 1.00 * 0.5
+    est_cost_in = cache_write_cost + cache_read_cost + dynamic_input_cost
     est_cost_out = est_output / 1_000_000 * 5.00 * 0.5
     est_total_cost = est_cost_in + est_cost_out
 
@@ -396,9 +632,10 @@ def print_preflight_estimate(estimate: dict) -> float:
     print(f"Estimated input tokens:  ~{est_input:,} (rough, ~4 chars/token)")
     print(f"Estimated output tokens: ~{est_output:,} (based on ~250 tok/filing "
           f"real average from the PPL test)")
-    print(f"\nEstimated cost (batch pricing, no caching -- confirmed ineligible "
-          f"at this prompt size):")
-    print(f"  Input:  ${est_cost_in:,.2f}")
+    print(f"\nEstimated cost (batch pricing, with prompt caching on the "
+          f"~{STATIC_PROMPT_TOKENS:,}-token static system prompt):")
+    print(f"  Input:  ${est_cost_in:,.2f}  (cache write ${cache_write_cost:,.4f} + "
+          f"cached reads ${cache_read_cost:,.2f} + dynamic content ${dynamic_input_cost:,.2f})")
     print(f"  Output: ${est_cost_out:,.2f}")
     print(f"  TOTAL:  ${est_total_cost:,.2f}")
     print("=" * 70)
