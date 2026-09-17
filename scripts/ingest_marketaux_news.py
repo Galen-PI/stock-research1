@@ -34,7 +34,14 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 MARKETAUX_BASE_URL = "https://api.marketaux.com/v1/news/all"
 
 # Your 6 tracked tickers
-TRACKED_TICKERS = ["MSFT", "AAPL", "PFE", "NVDA", "AMD", "JPM", "F", "PG", "GE", "XOM", "AEP", "LIN", "PLD", "T", "CVX"]
+TRACKED_TICKERS = [
+    "MMM", "ABBV", "AMD", "APD", "AAPL", "T", "BAC", "BA", "CAT", "CVX",
+    "CSCO", "C", "KO", "CL", "CMCSA", "COP", "COST", "DLR", "DUK", "DD",
+    "ECL", "EOG", "XOM", "F", "GE", "GS", "HD", "HON", "IBM", "INTC",
+    "JNJ", "JPM", "KMB", "LLY", "LIN", "LMT", "MCD", "MRK", "MSFT", "NEE",
+    "NKE", "NVDA", "PFE", "PG", "PLD", "PSA", "SLB", "SPG", "SO", "SBUX",
+    "USB", "UNP", "UNH", "VLO", "VZ", "WMT", "DIS", "WFC",
+]
 
 # Free tier is ~100 requests/day -- query all tracked tickers in ONE call
 # (Marketaux supports comma-separated symbols) rather than one call per

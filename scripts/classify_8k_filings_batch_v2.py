@@ -451,9 +451,19 @@ def fetch_one_candidate(c: dict) -> tuple[dict, str | None, str | None]:
                 time.sleep(wait)
                 continue
             return c, None, str(e)
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+            # Real gap found tonight: timeouts and connection errors were
+            # hard-failing on the first hit with zero retries, silently
+            # dropping filings from the batch (SEC EDGAR's own servers are
+            # frequently slow/flaky under sustained concurrent load, so
+            # this was a real, meaningful loss, not a rare edge case).
+            # Retry with the same backoff as a 429 instead of giving up.
+            wait = min(60, 2 ** attempt)
+            time.sleep(wait)
+            continue
         except Exception as e:
             return c, None, str(e)
-    return c, None, "429 Too Many Requests (exhausted retries)"
+    return c, None, "Exhausted retries (429s and/or timeouts)"
 
 
 def fetch_all_filing_texts_concurrently(candidates: list[dict]) -> tuple[dict, int]:
@@ -589,10 +599,13 @@ def estimate_tokens_for_requests(all_requests: list[dict]) -> dict:
 
     total_input_chars = total_system_chars + total_user_chars
     est_input_tokens = total_input_chars / 4
-    # max_tokens is a ceiling, not a guarantee of actual output length --
-    # use the real measured average (~250 tokens/filing from the PPL test)
-    # as a more realistic estimate than assuming every request maxes out.
-    est_output_tokens_per_request = 250
+    # max_tokens is a ceiling, not a guarantee of actual output length.
+    # 250 tok/filing came from a small 102-filing synchronous test and
+    # proved too low at real production scale -- the actual 49,656-filing
+    # batch run (2026-09-16) averaged 327 tokens/filing on real Anthropic
+    # usage-dashboard numbers (16,250,925 output tokens / 49,656 filings).
+    # Using the real, larger-scale figure going forward.
+    est_output_tokens_per_request = 327
     est_output_tokens = len(all_requests) * est_output_tokens_per_request
 
     return {
@@ -618,8 +631,18 @@ def print_preflight_estimate(estimate: dict) -> float:
     dynamic_input_per_request = max(0, (est_input / max(num_requests, 1)) - STATIC_PROMPT_TOKENS)
     dynamic_input_total = dynamic_input_per_request * num_requests
 
-    cache_write_cost = STATIC_PROMPT_TOKENS / 1_000_000 * 1.00 * 0.5 * 1.25
-    cache_read_cost = STATIC_PROMPT_TOKENS * max(num_requests - 1, 0) / 1_000_000 * 1.00 * 0.5 * 0.1
+    # Real observed cache-read ratio from the actual 49,656-filing production
+    # run (2026-09-16, Anthropic usage dashboard): 57.1%, not the ~99% a
+    # single-write-then-all-reads model assumes. A long, multi-job Batch API
+    # run outlives Anthropic's ~5-minute cache window repeatedly, so the
+    # cache gets rewritten (25% markup) far more often than the idealized
+    # case. Modeling against the real ratio instead of assuming best-case.
+    REAL_OBSERVED_CACHE_READ_RATIO = 0.571
+    static_prompt_total_tokens = STATIC_PROMPT_TOKENS * num_requests
+    static_read_tokens = static_prompt_total_tokens * REAL_OBSERVED_CACHE_READ_RATIO
+    static_write_tokens = static_prompt_total_tokens * (1 - REAL_OBSERVED_CACHE_READ_RATIO)
+    cache_write_cost = static_write_tokens / 1_000_000 * 1.00 * 0.5 * 1.25
+    cache_read_cost = static_read_tokens / 1_000_000 * 1.00 * 0.5 * 0.1
     dynamic_input_cost = dynamic_input_total / 1_000_000 * 1.00 * 0.5
     est_cost_in = cache_write_cost + cache_read_cost + dynamic_input_cost
     est_cost_out = est_output / 1_000_000 * 5.00 * 0.5
@@ -630,7 +653,7 @@ def print_preflight_estimate(estimate: dict) -> float:
     print("=" * 70)
     print(f"Requests to submit: {num_requests:,}")
     print(f"Estimated input tokens:  ~{est_input:,} (rough, ~4 chars/token)")
-    print(f"Estimated output tokens: ~{est_output:,} (based on ~250 tok/filing "
+    print(f"Estimated output tokens: ~{est_output:,} (based on ~327 tok/filing, "
           f"real average from the PPL test)")
     print(f"\nEstimated cost (batch pricing, with prompt caching on the "
           f"~{STATIC_PROMPT_TOKENS:,}-token static system prompt):")
