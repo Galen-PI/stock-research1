@@ -1,0 +1,30 @@
+name: Daily Marketaux news ingestion
+
+on:
+  schedule:
+    # Runs once a day at 13:00 UTC (adjust as needed) -- GitHub Actions
+    # cron runs independently of whether any Codespace is open, so this
+    # reliably uses the real ~100 req/day free-tier allowance every day
+    # instead of only when someone happens to run the script manually.
+    - cron: '0 13 * * *'
+  workflow_dispatch: {}  # also allows manually triggering a run from the GitHub UI
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run Marketaux ingestion
+        env:
+          MARKETAUX_API_KEY: ${{ secrets.MARKETAUX_API_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: python scripts/ingest_marketaux_news.py
