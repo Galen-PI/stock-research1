@@ -272,19 +272,29 @@ def _sql_escape(s: str) -> str:
 
 
 def build_query(start_date: str, end_date: str) -> str:
-    # One query, one CASE-based bucket per company, aggregated server-side.
+    # REAL FIX (written but deliberately not yet run, to avoid re-billing
+    # the in-progress backfill's quota): the original CASE/WHEN dispatch
+    # was exclusive -- it stopped at the FIRST matching company in dict
+    # order, so an article genuinely mentioning two tracked companies only
+    # ever counted toward whichever was listed first, silently
+    # undercounting companies later in the list. Fixed by building an
+    # ARRAY of every independently-matched ticker per article (via IF(),
+    # not CASE -- IF() doesn't short-circuit against other companies) and
+    # UNNESTing it, so one article can now genuinely contribute to every
+    # company it mentions. Same single-pass-over-the-table cost either
+    # way -- this does NOT change the real GB-scanned estimate.
     # Case-insensitive (UPPER on both sides) since GDELT organization name
     # capitalization varies (confirmed via real diagnostic: "Exxon",
     # "Exxonmobil", "Exxon Mobil" all appear as distinct raw variants).
-    case_clause_lines = []
+    match_array_lines = []
     for ticker, (names, _) in TRACKED_COMPANIES.items():
         name_conditions = []
         for name in names:
             safe_name = _sql_escape(name)
             name_conditions.append("UPPER(V2Organizations) LIKE UPPER('%" + safe_name + "%')")
         condition = " OR ".join(name_conditions)
-        case_clause_lines.append(f"        WHEN {condition} THEN '{ticker}'")
-    case_clauses = "\n".join(case_clause_lines)
+        match_array_lines.append(f"                IF({condition}, '{ticker}', NULL)")
+    match_array = ",\n".join(match_array_lines)
 
     org_filter_parts = []
     for names, _ in TRACKED_COMPANIES.values():
@@ -295,23 +305,22 @@ def build_query(start_date: str, end_date: str) -> str:
 
     return f"""
         SELECT
-            company_ticker,
+            matched_ticker AS company_ticker,
             DATE(PARSE_TIMESTAMP('%Y%m%d%H%M%S', CAST(DATE AS STRING))) AS article_date,
             COUNT(*) AS article_count,
             AVG(SAFE_CAST(SPLIT(V2Tone, ',')[OFFSET(0)] AS FLOAT64)) AS avg_tone
         FROM (
             SELECT DATE, V2Tone,
-                CASE
-{case_clauses}
-                    ELSE NULL
-                END AS company_ticker
+                [
+{match_array}
+                ] AS matched_tickers
             FROM `gdelt-bq.gdeltv2.gkg_partitioned`
             WHERE DATE(_PARTITIONTIME) >= PARSE_DATE('%Y%m%d', '{start_date}')
               AND DATE(_PARTITIONTIME) <= PARSE_DATE('%Y%m%d', '{end_date}')
               AND ({org_filter})
-        )
-        WHERE company_ticker IS NOT NULL
-        GROUP BY company_ticker, article_date
+        ), UNNEST(matched_tickers) AS matched_ticker
+        WHERE matched_ticker IS NOT NULL
+        GROUP BY matched_ticker, article_date
     """
 
 
