@@ -196,3 +196,71 @@ done
 ### `tag_reaction_character.py` -- real bug found and fixed this session
 
 This pre-existing script's `get_untagged_events()` had an unpaginated `event_entity_relationships` query -- silently capped at Supabase's default 1,000-row limit once that table grew past it (12,000+ rows now), causing it to report only ~70 events needing tags instead of the real ~11,500+. Same bug class as a previously-documented issue in `classify_8k_filings.py`'s resumability check. Fixed with the standard `.range()` pagination loop. **If this script ever again reports a suspiciously small "Found N events" count relative to known total event volume, check this exact function first before trusting the number.**
+
+## Addendum: Database Audit, GDELT Backfill, and Reaction-Tagging Fixes (this session, 2026-09-22)
+
+### `backfill_gdelt_sentiment.py` -- has NO `--live` flag, real interface is:
+```bash
+python scripts/backfill_gdelt_sentiment.py 2015-02 2026-09                    # writes for real by default
+python scripts/backfill_gdelt_sentiment.py 2015-02 2026-09 --dry-run-only     # print cost estimate, write nothing
+python scripts/backfill_gdelt_sentiment.py 2015-02 2026-09 --ignore-checkpoint # re-run months already marked complete
+```
+**Do not pass `--live`** -- it does not exist on this script (unlike the GDELT episode/totals scripts below) and errors with `unrecognized arguments`. Caught this exact mistake mid-session; worth remembering, not re-guessing next time.
+
+Real coverage gap found and partially fixed this session: `TRACKED_COMPANIES` was a hardcoded dict covering only ~184 of ~497 tracked securities -- not a stalled backfill, the script was simply never built to cover the full universe. A draft extension (`tracked_companies_extension.py`, ~280 additional tickers with real GDELT organization-name variants and entity_ids, several including historical pre-rename names like "Facebook" for META, "Raytheon Technologies" for RTX, "Equity Residential" for VMRK) has been written but needs merging into the main script and a full re-backfill with `--ignore-checkpoint` before it takes effect -- the existing checkpoint would otherwise silently skip months already marked complete under the old 184-company list.
+
+### `populate_sectors_gics.py` -- the real, correct sector-backfill script; `populate_sectors.py` (SIC-code-based) is an abandoned first attempt, do not use
+`securities.sector` was NULL for 421 of ~497 securities all session -- no script had ever populated it. First attempt (`populate_sectors.py`) mapped SEC SIC codes to GICS sectors via hand-built numeric ranges; spot-checking caught real misclassifications (defense contractor NOC labeled Health Care, Garmin labeled wrong sector vs. its real GICS classification) that a range-based SIC->GICS mapping could never fully resolve, since SIC and GICS are different taxonomies. **Replaced entirely** with `populate_sectors_gics.py`, which uses real S&P 500 GICS sector data transcribed directly from the authoritative constituent list (ticker -> real GICS sector, no inference). Resolved 419/421 correctly on first run; the last case (VMRK) needed a manual entry after discovering the AvalonBay/Equity Residential merger (see below). SPY correctly stays NULL -- it's an index fund, not a company with a GICS sector.
+```bash
+python scripts/populate_sectors_gics.py --dry-run
+python scripts/populate_sectors_gics.py --live
+```
+
+### AVB / EQR / VMRK -- real merger, not a data bug
+Equity Residential (EQR) and AvalonBay (AVB) completed a merger of equals 2026-08-17, renamed Vivmark Residential, began trading as VMRK 2026-08-18 (confirmed via real SEC 8-K search). This fully explains AVB's and EQR's absence from `market_prices` and their `failed` status in `onboarding_runs` (SEC's ticker mapping correctly stopped recognizing the old pre-merger tickers) -- **not** a "Twelve Data limitation" as an earlier project note assumed; that explanation was checked directly against the real onboarding step logs and found wrong. **EA's absence from `market_prices` remains a genuine, unexplained open question** -- no merger applies, still actively traded as EA.
+
+### `discover_global_events_combined.py` -- resume-safe patch written, replaces the original
+Original had two real bugs found after a mid-run crash: (1) no checkpoint -- a restart re-billed the entire BigQuery range from scratch; (2) all months were held in memory and only written at the very end of the full run -- a crash on month 130 of 139 meant zero rows written for the whole run, not partial credit. Patched version checkpoints per-month (writes daily counts and candidates immediately after each month succeeds, not at the end) and reconstructs the 30-day trailing baseline needed for spike detection from a new `global_events_daily_counts` table instead of re-querying BigQuery, so a resume costs nothing for months already done.
+```bash
+python scripts/discover_global_events_combined.py 2015-02 2026-09 --dry-run-only
+python scripts/discover_global_events_combined.py 2015-02 2026-09 --live
+```
+
+### `fetch_global_daily_totals.py` -- new script, needed for a real episode-detection bug
+Fetches total (unfiltered) daily GDELT article volume, separate from any theme. Built after finding that absolute per-theme article counts conflate real events with ordinary secular growth in GDELT's total corpus size over an 11-year span -- any spike/episode detection based on raw counts eventually mistakes "the whole corpus got bigger" for "this theme is having a moment." ~13.67 GB for the full 2015-2026 range, cheap.
+```bash
+python scripts/fetch_global_daily_totals.py 2015-02 2026-09 --dry-run-only
+python scripts/fetch_global_daily_totals.py 2015-02 2026-09 --live
+```
+
+### `build_event_episodes.py` -- UNRESOLVED, do not trust yet, four failed iterations so far
+Meant to group consecutive days of elevated theme coverage into one ongoing "episode" instead of disconnected daily candidates. Tested against the 2026-03-02 Iran/Khamenei conflict cluster (the one directly-verified ground-truth case, known elevated through at least 2026-04-10) through four versions, each breaking a case the previous version had fixed:
+- v1 (plain rolling baseline): closed the real episode after 4 days
+- v2 (freeze baseline at episode start): fixed that, but produced multi-YEAR "episodes" in other categories (baseline can't track real corpus growth)
+- v3 (two-pass quiet-day classifier): regressed back to closing after 9 days (classifier itself had v1's exact bug one level removed)
+- v4 (single-pass self-referential quiet pool): fixed the conflict case correctly, but STILL produced multi-year "still open since 2020" episodes in cyber/energy/macro/trade
+
+Root cause identified but not yet implemented: needs to measure each theme's SHARE of total daily coverage (using the new `fetch_global_daily_totals.py` data), not absolute count. **`global_event_episodes` table is empty (0 rows) -- nothing has been promoted from this mechanism.** Separately, `global_events` already has real prior review precedent (`severity` + `reviewer_note` columns, populated for 11 earlier-confirmed multi-day events like the Jan 2025 LA wildfires and Jul 2025 Texas floods) that handled the same multi-day-event problem by simply confirming each day individually with a note connecting related days -- worth strongly considering as the simpler, already-proven alternative to finishing this mechanism.
+
+### `multi_feature_model.py` -- real N+1 query bug fixed, plus a new `--exclude-bundled` test flag
+`get_sentiment_bucket()` was making one live Supabase query per event needing a sentiment bucket instead of a bulk fetch -- same bug class as an earlier documented fix in `build_ripple_timeline.py`. With thousands of reaction-tagged events, this meant thousands of sequential network round-trips; confirmed via ~3 seconds of actual CPU time after over an hour of wall-clock runtime. Fixed by fetching all of `company_sentiment_timeline` once into memory (`get_sentiment_lookup()`) and slicing locally per event. Also added `--exclude-bundled`, which filters out any event flagged in `event_component_dates` (known bundling/date-uncertainty risk) before training, for a direct before/after comparison -- run and found the exclusion barely moved test accuracy (32.8% -> 32.9%), meaning date-bundling contamination does NOT explain this model's null result.
+```bash
+python scripts/multi_feature_model.py 2024-09-01
+python scripts/multi_feature_model.py 2024-09-01 --exclude-bundled
+```
+
+### `tracked_companies_extension.py` -- new file, not yet merged
+Draft dict extension for `backfill_gdelt_sentiment.py`'s `TRACKED_COMPANIES` (see above). Excludes SPY deliberately (not a company). Flags a handful of generic-word tickers (TGT/Target, TPR/Tapestry, TTD/Trade Desk, HPQ, PTC, NVR, UDR, IEX) as needing a real spot-check against live GDELT data before trusting their match rates fully, since a plain name match risks false positives on ordinary use of these words in unrelated articles.
+
+
+## Known Gotchas (additions, this session)
+
+`sec_filings` and `sec_8k_filings` are misleadingly named -- **`sec_filings` contains ONLY 10-K/10-Q filings** (zero 8-Ks); the real 8-K-specific data (item codes, promotion tracking) lives in **`sec_8k_filings`**. Confirmed by direct column/row inspection; names are fully swapped from their real contents.
+
+`sec_8k_filings.promoted_to_event` is FALSE for every single row (154,607/154,607) -- looks like the promotion pipeline never worked, but it's just a dead, never-updated bookkeeping column. The real promotion pipeline works correctly and is verifiable via `event_source_filings` joined on `accession_number` (confirmed 90% of real events trace back to a real source 8-K this way). Same pattern found twice more this session: `event_pre_context.surprise_vs_consensus` (always NULL) and `financial_condition_score.fcf_margin_change` (always NULL, even though the raw ingredients -- `operating_cash_flow` and `capital_expenditures` -- exist for 4,489 rows where the simple subtraction was just never computed). **A column's null-rate or constant-value alone never proves the underlying pipeline is broken -- check for a real, working alternate mechanism before assuming so.**
+
+`reaction_character` (`event_tags`: rewarded/punished/muted) is computed per-EVENT, not per-(event, entity) -- for any event linked to more than one company via `event_entity_relationships` (COVID-19 market panic links 17 companies, the 2008 financial crisis links 12), the SAME single tag gets applied to every linked company regardless of their real, individually different price reactions. Confirmed this directly inflated `systemic_shock`'s apparent predictive strength in `multi_feature_model.py` testing. `event_entity_relationships.relationship_type` (primary/affected/actor/competitor) already distinguishes which company an event is really "about" -- neither `tag_reaction_character.py` nor any model built on its output currently uses this field. Real fix needed before trusting any `systemic_shock`/`geopolitical`/`government_action` result.
+
+A column's null-rate percentage alone never proves it's a usable feature -- `event_pre_context.size_bucket` was 97% populated (looked like a strong untested candidate feature) until sampling real rows showed every single populated value was identical (`large_or_mega_cap_tracked_universe`, zero variance) -- this project's tracked universe simply has no smaller-cap companies to bucket differently. Always sample real row content, not just aggregate null counts, before trusting any column as a feature.
+
+`financial_market_reactions` (a VIEW) computes real abnormal stock returns (0/1/5/20-day vs. SPY) for essentially every quarterly/annual financial filing -- 35,826 rows, 496/497 securities, 98.6-99.4% populated at every horizon. Discovered this session sitting completely unused by any prior model or test -- likely the strongest available foundation for predicting market reaction to financial results, independent of the `events`/`reaction_character` system entirely.

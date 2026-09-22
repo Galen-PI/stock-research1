@@ -12,6 +12,24 @@ Reports HONEST diagnostics beyond just accuracy:
   - samples-per-feature ratio (the real overfitting risk signal)
   - feature coefficients (what the model actually weighted, and how much)
   - train vs test accuracy gap (a real, direct overfitting check)
+
+PERF FIX (2026-09-22): the original get_sentiment_bucket() ran ONE live
+Supabase query per event needing a sentiment bucket -- the cache only
+helped when the exact (entity_id, event_date) pair repeated, which is
+rare since dates differ per event. With thousands of reaction-tagged
+events, that meant thousands of sequential network round-trips -- the
+same bug already found and fixed in build_ripple_timeline.py earlier
+today (its docstring: "A 50-event test took 15-25 minutes this way --
+extrapolated to ~12,295 events, that is multiple DAYS of runtime").
+Confirmed here too: after over an hour running, this script showed only
+~3 seconds of actual CPU time -- the signature of a process spending
+nearly all its time waiting on individual HTTP calls, not computing,
+and consistent with the repeated HTTP/2 ceiling crashes this script and
+walk_forward_continuous_score.py have both hit. Fixed the same way
+build_ripple_timeline.py was: fetch company_sentiment_timeline ONCE,
+paginated, into memory, then slice out each event's 7-day window
+locally instead of a new query per event. Same data in, same numbers
+out -- only how it's fetched changed.
 """
 
 import os
@@ -47,18 +65,33 @@ def paginated(table, select, filters=None):
     return rows
 
 
-def get_sentiment_bucket(entity_id, event_date_str, cache):
+def get_sentiment_lookup():
+    """Fetches ALL of company_sentiment_timeline ONCE (paginated), instead
+    of one live query per event -- see PERF FIX note above. Returns
+    entity_id -> sorted list of (date, avg_tone), so callers can slice
+    out whatever 7-day window they need in memory instead of a new
+    network round-trip per event."""
+    rows = paginated("company_sentiment_timeline", "entity_id,date,avg_tone")
+    by_entity: dict[str, list[tuple[str, float | None]]] = defaultdict(list)
+    for r in rows:
+        by_entity[r["entity_id"]].append((r["date"], r["avg_tone"]))
+    for entity_id in by_entity:
+        by_entity[entity_id].sort(key=lambda x: x[0])
+    return by_entity
+
+
+def get_sentiment_bucket(entity_id, event_date_str, sentiment_lookup, cache):
     key = (entity_id, event_date_str)
     if key in cache:
         return cache[key]
     end = date.fromisoformat(event_date_str)
     start = end - timedelta(days=7)
-    rows = supabase.table("company_sentiment_timeline").select("avg_tone") \
-        .eq("entity_id", entity_id).gte("date", start.isoformat()).lt("date", end.isoformat()).execute().data
-    if not rows:
-        cache[key] = "no_data"
-        return "no_data"
-    vals = [r["avg_tone"] for r in rows if r["avg_tone"] is not None]
+    start_str, end_str = start.isoformat(), end.isoformat()
+
+    # In-memory slice of the pre-fetched lookup -- no network call.
+    entity_rows = sentiment_lookup.get(entity_id, [])
+    vals = [tone for d, tone in entity_rows if start_str <= d < end_str and tone is not None]
+
     if not vals:
         cache[key] = "no_data"
         return "no_data"
@@ -68,7 +101,7 @@ def get_sentiment_bucket(entity_id, event_date_str, cache):
     return bucket
 
 
-def build_dataset():
+def build_dataset(exclude_bundled: bool = False):
     tag_names = {t["id"]: t["name"] for t in supabase.table("tags").select("id,name").execute().data}
     reaction_tags = {"rewarded", "punished", "muted"}
 
@@ -79,6 +112,29 @@ def build_dataset():
     pre_context = {r["event_id"]: r for r in paginated("event_pre_context", "event_id,firm_state_label,regime_id")}
     regime_names = {r["id"]: r["name"] for r in supabase.table("market_regimes").select("id,name").execute().data}
 
+    bundled_event_ids = set()
+    if exclude_bundled:
+        # Real test (2026-09-22): tag_reaction_character.py's own docstring
+        # warns that a bundled event's stored event_date is often the
+        # FIRST filing in a bundle, not the real headline moment (its
+        # example: Disney's Chapek firing stored as 2021-04-06, actually
+        # 2022-11-21). If the reaction-character label was computed
+        # against the wrong day's price move for ~12.5% of training rows
+        # (855/6814, confirmed via event_component_dates), that's a real
+        # candidate explanation for six straight null results today --
+        # mislabeled targets can hide genuine signal. This flag excludes
+        # any event with a row in event_component_dates (known bundling
+        # risk) so the SAME model/features can be re-run on a cleaner
+        # subset and directly compared against the original result,
+        # rather than assuming contamination explains it without testing.
+        rows = paginated("event_component_dates", "event_id")
+        bundled_event_ids = {r["event_id"] for r in rows}
+        print(f"  Excluding {len(bundled_event_ids)} events with known bundling/date-uncertainty risk.")
+
+    print("Fetching sentiment timeline once (was: one query per event -- see PERF FIX note)...")
+    sentiment_lookup = get_sentiment_lookup()
+    print(f"  Loaded sentiment history for {len(sentiment_lookup)} entities.\n")
+
     reactions = {}
     for r in paginated("event_tags", "event_id,tag_id"):
         name = tag_names.get(r["tag_id"])
@@ -88,15 +144,19 @@ def build_dataset():
     sentiment_cache = {}
     rows = []
     skipped_missing_feature = 0
+    skipped_bundled = 0
     for event_id, event_date in events.items():
         if event_id not in reactions:
+            continue
+        if exclude_bundled and event_id in bundled_event_ids:
+            skipped_bundled += 1
             continue
         etype = type_names.get(type_map.get(event_id))
         entity_id = entity_map.get(event_id)
         pc = pre_context.get(event_id)
         firm_state = pc.get("firm_state_label") if pc else None
         regime = regime_names.get(pc.get("regime_id")) if pc else None
-        sentiment = get_sentiment_bucket(entity_id, event_date, sentiment_cache) if entity_id else None
+        sentiment = get_sentiment_bucket(entity_id, event_date, sentiment_lookup, sentiment_cache) if entity_id else None
 
         # Real fix (same class of bug found and fixed in walk_forward_test.py):
         # a row with ANY missing feature is skipped entirely, rather than
@@ -115,17 +175,20 @@ def build_dataset():
         })
     print(f"  Skipped {skipped_missing_feature} events missing at least one real feature value "
           f"(no longer filled with a fake 'unknown'/'no_data' placeholder).")
+    if exclude_bundled:
+        print(f"  Skipped {skipped_bundled} events for known bundling/date-uncertainty risk.")
     return sorted(rows, key=lambda r: r["event_date"])
 
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python multi_feature_model.py <cutoff_date: YYYY-MM-DD>")
+        print("Usage: python multi_feature_model.py <cutoff_date: YYYY-MM-DD> [--exclude-bundled]")
         sys.exit(1)
     cutoff = sys.argv[1]
+    exclude_bundled = "--exclude-bundled" in sys.argv
 
-    print("Building dataset (this queries sentiment per-event, may take a minute)...")
-    rows = build_dataset()
+    print("Building dataset (sentiment now fetched once, not per-event)...")
+    rows = build_dataset(exclude_bundled=exclude_bundled)
     print(f"Total labeled rows: {len(rows)}\n")
 
     train_rows = [r for r in rows if r["event_date"] < cutoff]
