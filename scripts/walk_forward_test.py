@@ -38,7 +38,7 @@ MIN_N_FOR_READY = 30
 MIN_N_TEST_BUCKET = 10  # lower bar for individual test buckets to even report
 
 
-def get_all_data():
+def get_all_data(feature):
     """Pull every event with both a pre-context feature set AND a
     reaction_character tag, chronologically ordered."""
     events = {}
@@ -92,6 +92,16 @@ def get_all_data():
         if event_id not in pre_context or event_id not in reactions:
             continue
         pc = pre_context[event_id]
+        # Real fix: only include this event if the feature we're about to
+        # TEST actually has a real value. Previously, r[feature] or "UNKNOWN"
+        # downstream folded every null into a fake bucket and scored it --
+        # UNKNOWN turned out to be the SINGLE LARGEST bucket (n=4,729/10,598
+        # train rows, ~45%), diluting the test with rows carrying zero real
+        # signal. Skip here instead, so get_all_data() only ever returns
+        # events with a genuine, known value for the feature under test.
+        feature_value = pc.get(feature)
+        if feature_value is None:
+            continue
         for reaction in reactions[event_id]:
             rows.append({
                 "event_id": event_id,
@@ -112,7 +122,7 @@ def main():
     feature = sys.argv[1]
     cutoff = sys.argv[2]
 
-    rows = get_all_data()
+    rows = get_all_data(feature)
     print(f"Total event-reaction rows with both pre-context AND reaction_character: {len(rows)}\n")
 
     train = [r for r in rows if r["event_date"] < cutoff]

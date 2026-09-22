@@ -18,6 +18,14 @@ supabase_headers = {
 
 # Same four companies already tracked elsewhere in the project.
 COMPANIES = [
+    {"ticker": "VMRK", "cik": "0000906107", "security_id": "bbe92f38-0db0-440f-8753-749ef2f23449"},
+    {"ticker": "EA", "cik": "0000712515", "security_id": "13277c91-2741-494d-afc1-dd0df696385b"},
+    {"ticker": "AVB", "cik": "0000915912", "security_id": "9ef32e73-f13e-488e-a262-b387a2ef549e"},
+    {"ticker": "BRK-B", "cik": "0001067983", "security_id": "89de104a-6604-4992-a3cc-38e490b6d36c"},
+    {"ticker": "BF-B", "cik": "0000014693", "security_id": "78c6d9bb-414a-4bf1-8ec0-99b304ffad38"},
+    {"ticker": "MO", "cik": "0000764180", "security_id": "cd828a9a-51b3-46e8-ab78-845652c3b68a"},
+    {"ticker": "AMCR", "cik": "0001748790", "security_id": "1292c82b-13a2-43a2-8fb9-549848624518"},
+    {"ticker": "AEE", "cik": "0001002910", "security_id": "5e0b2ed9-951e-49cf-9405-b5cad6dbdbae"},
     {"ticker": "ZBH", "cik": "0001136869", "security_id": "4c70a627-5118-4634-bab1-4b797b0205f4"},
     {"ticker": "XEL", "cik": "0000072903", "security_id": "083271fa-7c49-4e2e-90b1-4000878873b8"},
     {"ticker": "WTW", "cik": "0001140536", "security_id": "7cfd9ca1-46f6-44d2-973b-2ab11ae0f80a"},

@@ -87,22 +87,34 @@ def build_dataset():
 
     sentiment_cache = {}
     rows = []
+    skipped_missing_feature = 0
     for event_id, event_date in events.items():
         if event_id not in reactions:
             continue
-        etype = type_names.get(type_map.get(event_id), "unknown")
+        etype = type_names.get(type_map.get(event_id))
         entity_id = entity_map.get(event_id)
-        firm_state = "unknown"
-        regime = "unknown"
         pc = pre_context.get(event_id)
-        if pc:
-            firm_state = pc.get("firm_state_label") or "unknown"
-            regime = regime_names.get(pc.get("regime_id"), "unknown")
-        sentiment = get_sentiment_bucket(entity_id, event_date, sentiment_cache) if entity_id else "no_data"
+        firm_state = pc.get("firm_state_label") if pc else None
+        regime = regime_names.get(pc.get("regime_id")) if pc else None
+        sentiment = get_sentiment_bucket(entity_id, event_date, sentiment_cache) if entity_id else None
+
+        # Real fix (same class of bug found and fixed in walk_forward_test.py):
+        # a row with ANY missing feature is skipped entirely, rather than
+        # filled with a fake "unknown"/"no_data" category the model would
+        # otherwise treat as real, learnable signal. A trained classifier
+        # can assign confident-looking weight to what is actually a
+        # "we don't know" placeholder -- worse than the dilution problem
+        # in the simple lookup-table walk-forward test.
+        if etype is None or firm_state is None or regime is None or sentiment is None:
+            skipped_missing_feature += 1
+            continue
+
         rows.append({
             "event_date": event_date, "event_type": etype, "firm_state": firm_state,
             "regime": regime, "sentiment": sentiment, "reaction": reactions[event_id],
         })
+    print(f"  Skipped {skipped_missing_feature} events missing at least one real feature value "
+          f"(no longer filled with a fake 'unknown'/'no_data' placeholder).")
     return sorted(rows, key=lambda r: r["event_date"])
 
 

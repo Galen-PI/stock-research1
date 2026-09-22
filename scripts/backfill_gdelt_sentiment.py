@@ -209,7 +209,7 @@ TRACKED_COMPANIES = {
     "NSC": (["Norfolk Southern"], "5bcc114d-8869-494a-aa50-f93a0505d3dc"),
     "NVDA": (["Nvidia"], "5ed0c008-f3ec-4e0f-9343-faad2f29a47e"),
     "NWS": (["News Corp"], "03bd0eae-d039-4f1d-b1ac-12d6c385ebe8"),
-    "NWSA": (["News Corp"], "62564d80-7af4-4cf6-835e-4150f101ad92"),
+    "NWSA": (["News Corp"], "03bd0eae-d039-4f1d-b1ac-12d6c385ebe8"),
     "OKE": (["ONEOK"], "b1851b28-c0cb-4f4d-9394-687ae006d613"),
     "PCG": (["PG&E"], "a793cc80-bdb1-4d96-8d9f-a61265a41f52"),
     "PFE": (["Pfizer"], "e90c513e-b03d-4d58-8df0-32792832f4bd"),

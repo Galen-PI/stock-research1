@@ -38,6 +38,56 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 DAYS_BEFORE = 5   # trading-day offsets from -5
 DAYS_AFTER = 40   # through +40 -- wide enough to see a shock stabilize
 
+# Perf fix: the original version re-queried Supabase for ticker/sector and
+# for a narrow price window on EVERY event-entity pair, even though the
+# same entity/ticker appears across many events. A 50-event test took
+# 15-25 minutes this way -- extrapolated to the real ~12,295 events, that
+# is multiple DAYS of runtime. These caches change nothing about WHICH
+# rows are used or HOW the abnormal-return math works (see build_for_event,
+# untouched below) -- they only fetch each ticker's full price history and
+# each entity's ticker/sector ONCE per run instead of once per pair, then
+# slice the needed window out of memory. Same data in, same numbers out.
+_TICKER_SECTOR_CACHE: dict[str, tuple[str | None, str | None]] = {}
+_PRICE_HISTORY_CACHE: dict[str, list[dict]] = {}
+
+
+def get_full_price_history(ticker: str) -> list[dict]:
+    """Fetches and caches a ticker's ENTIRE price history once. Subsequent
+    calls for the same ticker return the cached list instantly -- no new
+    query. Callers slice out whatever date window they need in memory."""
+    if ticker in _PRICE_HISTORY_CACHE:
+        return _PRICE_HISTORY_CACHE[ticker]
+    sec = supabase.table("securities").select("id").eq("ticker", ticker).execute().data
+    if not sec:
+        _PRICE_HISTORY_CACHE[ticker] = []
+        return []
+    security_id = sec[0]["id"]
+    rows = []
+    offset = 0
+    page_size = 1000
+    while True:
+        page = supabase.table("market_prices") \
+            .select("price_date,adjusted_close") \
+            .eq("security_id", security_id) \
+            .order("price_date") \
+            .range(offset, offset + page_size - 1).execute().data
+        if not page:
+            break
+        rows.extend(page)
+        if len(page) < page_size:
+            break
+        offset += page_size
+    _PRICE_HISTORY_CACHE[ticker] = rows
+    return rows
+
+
+def get_prices_from_cache(ticker: str, start_date: str, end_date: str) -> list[dict]:
+    """Same output shape/order as the original get_prices(), sliced from
+    the cached full history instead of a fresh query -- identical rows,
+    identical order, zero change to what build_for_event() receives."""
+    full_history = get_full_price_history(ticker)
+    return [r for r in full_history if start_date <= r["price_date"] <= end_date]
+
 
 def get_prices(ticker: str, start_date: str, end_date: str) -> list[dict]:
     """Identical to tag_reaction_character.py's get_prices() -- reused
@@ -57,37 +107,56 @@ def get_prices(ticker: str, start_date: str, end_date: str) -> list[dict]:
 
 
 def get_events(limit: int | None) -> list[dict]:
-    q = supabase.table("events").select("id,title,event_date").order("event_date")
     if limit:
-        q = q.limit(limit)
-    return q.execute().data
+        return supabase.table("events").select("id,title,event_date") \
+            .order("event_date").limit(limit).execute().data
+
+    events = []
+    offset = 0
+    page_size = 1000
+    while True:
+        page = supabase.table("events").select("id,title,event_date") \
+            .order("event_date") \
+            .range(offset, offset + page_size - 1).execute().data
+        if not page:
+            break
+        events.extend(page)
+        if len(page) < page_size:
+            break
+        offset += page_size
+    return events
 
 
 def get_event_entities(event_ids: list[str]) -> dict[str, list[str]]:
     """event_id -> [entity_id, ...]"""
     result: dict[str, list[str]] = {}
-    offset = 0
-    page_size = 1000
-    while True:
-        page = supabase.table("event_entity_relationships") \
-            .select("event_id,entity_id") \
-            .in_("event_id", event_ids) \
-            .range(offset, offset + page_size - 1).execute().data
-        if not page:
-            break
-        for row in page:
-            result.setdefault(row["event_id"], []).append(row["entity_id"])
-        if len(page) < page_size:
-            break
-        offset += page_size
+    id_chunk_size = 200  # keep the .in_() URL well under any length limit
+    for i in range(0, len(event_ids), id_chunk_size):
+        id_chunk = event_ids[i:i + id_chunk_size]
+        offset = 0
+        page_size = 1000
+        while True:
+            page = supabase.table("event_entity_relationships") \
+                .select("event_id,entity_id") \
+                .in_("event_id", id_chunk) \
+                .range(offset, offset + page_size - 1).execute().data
+            if not page:
+                break
+            for row in page:
+                result.setdefault(row["event_id"], []).append(row["entity_id"])
+            if len(page) < page_size:
+                break
+            offset += page_size
     return result
 
 
 def get_ticker_and_sector(entity_id: str) -> tuple[str | None, str | None]:
+    if entity_id in _TICKER_SECTOR_CACHE:
+        return _TICKER_SECTOR_CACHE[entity_id]
     row = supabase.table("securities").select("ticker,sector").eq("entity_id", entity_id).execute().data
-    if not row:
-        return None, None
-    return row[0]["ticker"], row[0].get("sector")
+    result = (None, None) if not row else (row[0]["ticker"], row[0].get("sector"))
+    _TICKER_SECTOR_CACHE[entity_id] = result
+    return result
 
 
 def build_for_event(event: dict, entity_id: str, live: bool) -> int:
@@ -100,8 +169,8 @@ def build_for_event(event: dict, entity_id: str, live: bool) -> int:
     start = (date.fromisoformat(event_date) - timedelta(days=DAYS_BEFORE + 10)).isoformat()
     end = (date.fromisoformat(event_date) + timedelta(days=DAYS_AFTER + 15)).isoformat()
 
-    company_prices = get_prices(ticker, start, end)
-    spy_prices = get_prices("SPY", start, end)
+    company_prices = get_prices_from_cache(ticker, start, end)
+    spy_prices = get_prices_from_cache("SPY", start, end)
     if len(company_prices) < 5 or len(spy_prices) < 5:
         return 0
 
@@ -145,6 +214,26 @@ def build_for_event(event: dict, entity_id: str, live: bool) -> int:
     return len(rows_to_write)
 
 
+def get_completed_event_ids() -> set[str]:
+    """Real resume logic: the full --live run has no way to survive an
+    HTTP/2 connection drop (hit at ~20,000 requests on one run) without
+    this -- upserts are per-row, so anything already written is safe to
+    skip rather than reprocessed on a rerun."""
+    completed = set()
+    offset = 0
+    page_size = 1000
+    while True:
+        page = supabase.table("event_ripple_timeline").select("event_id") \
+            .range(offset, offset + page_size - 1).execute().data
+        if not page:
+            break
+        completed.update(row["event_id"] for row in page)
+        if len(page) < page_size:
+            break
+        offset += page_size
+    return completed
+
+
 def main():
     args = sys.argv[1:]
     live = "--live" in args
@@ -153,6 +242,15 @@ def main():
         limit = int(args[args.index("--test") + 1])
 
     events = get_events(limit)
+
+    if live:
+        completed_ids = get_completed_event_ids()
+        if completed_ids:
+            before = len(events)
+            events = [e for e in events if e["id"] not in completed_ids]
+            print(f"Resuming: {len(completed_ids)} event(s) already have data in "
+                  f"event_ripple_timeline, skipping {before - len(events)} of them.")
+
     print(f"Processing {len(events)} event(s){' (LIVE writes)' if live else ' (DRY RUN -- nothing written)'}...")
 
     event_ids = [e["id"] for e in events]

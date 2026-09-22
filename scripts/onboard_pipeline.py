@@ -112,11 +112,16 @@ def count_rows(table: str, security_id: str = None, ticker: str = None) -> int:
 
 
 def main():
-    if len(sys.argv) != 2:
-        print("Usage: python scripts/onboard_pipeline.py TICKER")
+    if len(sys.argv) not in (2, 3):
+        print("Usage: python scripts/onboard_pipeline.py TICKER [MANUAL_CIK]")
+        print("  MANUAL_CIK: optional -- supply this when the ticker is not in SEC's")
+        print("  company_tickers.json (confirmed real gap for AVB, EA, EQR -- found via")
+        print("  direct EDGAR name search instead). Never guess a CIK; only pass one")
+        print("  already verified against a real SEC source.")
         sys.exit(1)
 
     ticker = sys.argv[1].upper()
+    manual_cik = sys.argv[2] if len(sys.argv) == 3 else None
     print(f"\n{'='*70}\nONBOARDING {ticker}\n{'='*70}\n")
 
     run_id = start_run(ticker)
@@ -134,12 +139,16 @@ def main():
               f"entity_id={entity_id} security_id={security_id}")
 
     # --- Get CIK (needed for step 2) ---
-    cik = get_cik_for_ticker(ticker)
-    if not cik:
-        log_step(run_id, "lookup_cik", "failed", "SEC mapping had no CIK for this ticker.", "")
-        finish_run(run_id, "failed")
-        return
-    log_step(run_id, "lookup_cik", "success", f"CIK {cik}", f"CIK={cik}")
+    if manual_cik:
+        cik = manual_cik
+        log_step(run_id, "lookup_cik", "success", f"CIK {cik} (manually supplied -- not in SEC's company_tickers.json)", f"CIK={cik}")
+    else:
+        cik = get_cik_for_ticker(ticker)
+        if not cik:
+            log_step(run_id, "lookup_cik", "failed", "SEC mapping had no CIK for this ticker.", "")
+            finish_run(run_id, "failed")
+            return
+        log_step(run_id, "lookup_cik", "success", f"CIK {cik}", f"CIK={cik}")
 
     # --- Step 2: wire into mapping scripts ---
     ok, output = run_script(["scripts/add_company_mappings.py", ticker, cik, entity_id, security_id])

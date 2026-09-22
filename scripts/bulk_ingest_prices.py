@@ -51,6 +51,19 @@ RETRY_BACKOFF_SECONDS = 65  # a bit over a minute, to clear the per-minute windo
 WINDOW_1 = ("1994-01-01", "2011-12-31")
 WINDOW_2 = ("2012-01-01", "2026-09-11")
 
+# Twelve Data requires dot notation for dual-class share tickers
+# (BRK.B, BF.B) -- our own database stores these with a dash (BRK-B,
+# BF-B) to match SEC's own naming convention and avoid breaking every
+# other script's string-matching logic that assumes no "." in a ticker.
+# This map translates ONLY at the Twelve Data API call boundary; the
+# stored ticker (used for the securities lookup, upsert, and everywhere
+# else) is untouched. Confirmed via direct test against Twelve Data's
+# API: BRK-B/BF-B both 404, BRK.B/BF.B both return real data.
+TWELVE_DATA_SYMBOL_OVERRIDES = {
+    "BRK-B": "BRK.B",
+    "BF-B": "BF.B",
+}
+
 
 def get_tickers_needing_prices() -> list[str]:
     # Real bug fixed here: the old version paginated through the ENTIRE
@@ -77,10 +90,11 @@ def get_tickers_needing_prices() -> list[str]:
 def fetch_one_window(ticker: str, start: str, end: str) -> bool:
     """Returns True on success, False if it failed after all retries
     (e.g. a real 'no data available' error, not just rate-limiting)."""
+    twelve_data_symbol = TWELVE_DATA_SYMBOL_OVERRIDES.get(ticker, ticker)
     for attempt in range(1, MAX_RETRIES_ON_RATE_LIMIT + 1):
         try:
             security = prices_module.get_security(ticker)
-            prices = prices_module.get_prices(ticker, start, end)
+            prices = prices_module.get_prices(twelve_data_symbol, start, end)
             prices_module.upsert_prices(security["id"], prices)
             return True
         except RuntimeError as e:

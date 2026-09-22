@@ -33,10 +33,18 @@ CONCEPTS = {
         "SalesRevenueNet",
         "OperatingLeasesIncomeStatementLeaseRevenue",
         "RealEstateRevenueNet",
+        # NOTE: this concept reports revenue INCLUDING assessed tax,
+        # unlike every other candidate above (which exclude it). Kept
+        # last/lowest-priority on purpose. Confirmed needed for CRWD,
+        # which tags total revenue under this exact concept and no
+        # other. build_concept_facts() logs a warning whenever this
+        # (or any non-primary candidate) actually contributes data,
+        # so affected tickers are traceable rather than silently blended.
+        "RevenueFromContractWithCustomerIncludingAssessedTax",
     ],
     "gross_profit": ["GrossProfit"],
     "operating_income": ["OperatingIncomeLoss"],
-    "net_income": ["NetIncomeLoss"],
+    "net_income": ["NetIncomeLoss","ProfitLoss", "NetIncomeLossAvailableToCommonStockholdersBasic",],
     "eps_basic": ["EarningsPerShareBasic"],
     "eps_diluted": ["EarningsPerShareDiluted"],
     "total_assets": ["Assets"],
@@ -52,6 +60,14 @@ CONCEPTS = {
 
 
 CIK_TO_TICKER = {
+    "906107": "VMRK",
+    "712515": "EA",
+    "915912": "AVB",
+    "1067983": "BRK-B",
+    "14693": "BF-B",
+    "764180": "MO",
+    "1748790": "AMCR",
+    "1002910": "AEE",
     "1136869": "ZBH",
     "72903": "XEL",
     "1140536": "WTW",
@@ -545,6 +561,14 @@ CIK_TO_TICKER = {
 
 # Each ticker's fiscal year end, needed for correct quarter/Q4 derivation.
 FISCAL_YEAR_END = {
+    "VMRK": (12, 31),      # standard calendar year (default -- edit manually if non-standard)
+    "EA": (12, 31),      # standard calendar year (default -- edit manually if non-standard)
+    "AVB": (12, 31),      # standard calendar year (default -- edit manually if non-standard)
+    "BRK-B": (12, 31),      # standard calendar year (default -- edit manually if non-standard)
+    "BF-B": (12, 31),      # standard calendar year (default -- edit manually if non-standard)
+    "MO": (12, 31),      # standard calendar year (default -- edit manually if non-standard)
+    "AMCR": (12, 31),      # standard calendar year (default -- edit manually if non-standard)
+    "AEE": (12, 31),      # standard calendar year (default -- edit manually if non-standard)
     "ZBH": (12, 31),      # standard calendar year (default -- edit manually if non-standard)
     "XEL": (12, 31),      # standard calendar year (default -- edit manually if non-standard)
     "WTW": (12, 31),      # standard calendar year (default -- edit manually if non-standard)
@@ -1181,10 +1205,16 @@ def build_concept_facts(data, concept_map):
         combined = []
         seen_keys = set()
 
-        for concept_name in candidate_names:
+        for candidate_index, concept_name in enumerate(candidate_names):
             concept_data = us_gaap.get(concept_name)
             if not concept_data:
                 continue
+
+            if candidate_index > 0:
+                print(f"  NON-PRIMARY CONCEPT USED for '{field}': '{concept_name}' "
+                      f"(candidate #{candidate_index + 1} of {len(candidate_names)}, "
+                      f"primary is '{candidate_names[0]}') -- verify this is an "
+                      f"acceptable substitute before trusting cross-company comparisons.")
 
             if field in {"eps_basic", "eps_diluted"}:
                 facts = get_eps_facts(concept_data)
@@ -1539,6 +1569,31 @@ def build_quarterly_periods(data, concept_map, ticker):
         q2 = periods.get((fiscal_year, 2))
         q3 = periods.get((fiscal_year, 3))
 
+        # Real bug found on FTV (first reported FY, 2015, post-Danaher
+        # spinoff, thin quarterly history): the annual-minus-Q1Q2Q3
+        # derivation below can land Q4 on the SAME period_end as an
+        # already-placed Q1/Q2/Q3 when that quarter's real end date is
+        # close to the annual end date. Two rows sharing the same
+        # (statement_type, period_type, period_end) key make Postgres's
+        # upsert fail outright ("cannot affect row a second time"),
+        # which silently zeroed out this ticker's ENTIRE financial_statements
+        # history, not just the one bad quarter. Skip (with a printed
+        # warning, never silently) rather than write a colliding row.
+        collision = None
+        if q1 and q1.get("period_end") == annual_end:
+            collision = ("Q1", q1)
+        elif q2 and q2.get("period_end") == annual_end:
+            collision = ("Q2", q2)
+        elif q3 and q3.get("period_end") == annual_end:
+            collision = ("Q3", q3)
+        if collision:
+            label, _ = collision
+            print(f"WARNING: {ticker} FY{fiscal_year} Q4 derivation skipped -- "
+                  f"annual period_end ({annual_end}) collides with {label}'s "
+                  f"period_end. Likely a thin/irregular first reported fiscal "
+                  f"year (e.g. a spinoff year). Not writing a Q4 row for this year.")
+            continue
+
         q4 = {
             "period_end": annual_end, "period_type": "quarterly",
             "statement_type": "income_cash_flow", "start": None,
@@ -1670,11 +1725,16 @@ def upsert_financial_records(records):
     print(f"Successfully upserted {len(normalized)} financial records.")
 
 
-def ingest_ticker(cik):
+def ingest_ticker(cik, ticker_override=None):
     cik_string = str(cik).strip()
-    ticker = CIK_TO_TICKER.get(cik_string)
+    ticker = ticker_override or CIK_TO_TICKER.get(cik_string)
     if not ticker:
         raise RuntimeError(f"No ticker mapping exists for SEC CIK {cik_string}")
+    if ticker_override:
+        print(f"(ticker_override active: writing this CIK's SEC data to "
+              f"security '{ticker_override}' instead of the CIK_TO_TICKER "
+              f"default -- used for dual-class share pairs like NWS/NWSA "
+              f"that share one CIK.)")
 
     print()
     print(f"=== {ticker} (CIK {cik_string}) ===")

@@ -78,15 +78,24 @@ def fetch_financial_statements():
     print("FETCHING FINANCIAL STATEMENTS")
     print("-" * 60)
 
-    response = (
-        supabase
-        .table("financial_statements")
-        .select("*")
-        .order("period_end")
-        .execute()
-    )
-
-    statements = response.data or []
+    statements = []
+    offset = 0
+    page_size = 1000
+    while True:
+        page = (
+            supabase
+            .table("financial_statements")
+            .select("*")
+            .order("period_end")
+            .range(offset, offset + page_size - 1)
+            .execute()
+        ).data
+        if not page:
+            break
+        statements.extend(page)
+        if len(page) < page_size:
+            break
+        offset += page_size
 
     print(
         f"Financial statements found: "
@@ -574,6 +583,35 @@ def calculate_all_metrics(statements):
 # UPSERT METRICS
 # ============================================================
 
+def _dedupe_metrics(metrics):
+    """Real bug found: 576 (security_id, period_type, period_end)
+    collisions across many securities -- same root cause class as the
+    FTV Q4/annual period_end collision found in ingest_sec_financials_multi.py,
+    evidently widespread in this data too. A single upsert batch fails
+    outright on ANY duplicate key ("cannot affect row a second time"),
+    so this must be resolved before upserting, not left for Postgres
+    to reject. Tiebreaker: keep whichever row has more non-null
+    computed fields (a reasonable, deterministic choice -- the more
+    complete metric record). Every collision is printed, never silent."""
+    best_by_key = {}
+    for m in metrics:
+        key = (m["security_id"], m["period_type"], m["period_end"])
+        if key not in best_by_key:
+            best_by_key[key] = m
+            continue
+        existing = best_by_key[key]
+        existing_filled = sum(1 for v in existing.values() if v is not None)
+        new_filled = sum(1 for v in m.values() if v is not None)
+        if new_filled > existing_filled:
+            print(f"  DUPLICATE KEY {key}: keeping the more complete of 2 "
+                  f"records ({new_filled} vs {existing_filled} non-null fields).")
+            best_by_key[key] = m
+        else:
+            print(f"  DUPLICATE KEY {key}: keeping the first of 2 records "
+                  f"({existing_filled} vs {new_filled} non-null fields).")
+    return list(best_by_key.values())
+
+
 def upsert_metrics(metrics):
 
     if not metrics:
@@ -586,40 +624,60 @@ def upsert_metrics(metrics):
     print("-" * 60)
 
     print(
-        f"Records prepared: "
+        f"Records prepared (before dedupe): "
         f"{len(metrics)}"
     )
 
-    response = (
-        supabase
-        .table("financial_metrics")
-        .upsert(
-            metrics,
-            on_conflict=(
-                "security_id,"
-                "period_type,"
-                "period_end"
-            ),
-        )
-        .execute()
+    metrics = _dedupe_metrics(metrics)
+
+    print(
+        f"Records prepared (after dedupe): "
+        f"{len(metrics)}"
     )
 
-    if response.data is None:
-        raise RuntimeError(
-            "Supabase returned no data from "
-            "financial_metrics upsert."
-        )
+    # Chunk by security_id -- if a still-undiscovered collision or any
+    # other per-row issue ever slips past the dedupe above, it only
+    # blocks that ONE security's metrics, not the entire run. Also
+    # keeps individual upsert payloads a reasonable size.
+    from collections import defaultdict
+    by_security = defaultdict(list)
+    for m in metrics:
+        by_security[m["security_id"]].append(m)
+
+    total_processed = 0
+    total_failed = 0
+    for security_id, rows in by_security.items():
+        try:
+            response = (
+                supabase
+                .table("financial_metrics")
+                .upsert(
+                    rows,
+                    on_conflict=(
+                        "security_id,"
+                        "period_type,"
+                        "period_end"
+                    ),
+                )
+                .execute()
+            )
+            if response.data is None:
+                print(f"  WARNING: no data returned for security {security_id}, "
+                      f"{len(rows)} rows -- treating as failed.")
+                total_failed += len(rows)
+                continue
+            total_processed += len(rows)
+        except Exception as e:
+            print(f"  FAILED upsert for security {security_id} ({len(rows)} rows): {e}")
+            total_failed += len(rows)
 
     print()
     print(
-        "Financial metrics successfully "
-        "populated."
+        "Financial metrics upsert complete."
     )
-
-    print(
-        f"Records processed: "
-        f"{len(metrics)}"
-    )
+    print(f"Records processed: {total_processed}")
+    if total_failed:
+        print(f"Records FAILED: {total_failed} -- see warnings above.")
 
 
 # ============================================================
