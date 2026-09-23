@@ -1,30 +1,39 @@
 """
-check_event_exposure.py
+check_event_exposure.py (FIXED 2026-09-23)
 
-The real "sector exposure check" for confirmed global_events -- answers
-"which companies did this event actually ripple to?" using GDELT tone
-data (company_sentiment_timeline), not geography. This is the mechanism
-insight from earlier tonight: a real article about a shock will show up
-as a measurable tone shift for exposed companies, whether or not that
-company's own SEC filings ever mention the event.
+REAL BUG FOUND AND FIXED TONIGHT: the original version called
+get_all_companies() once PER EVENT (wasteful -- the company list never
+changes) and issued one live Supabase query per (entity, event) pair for
+both the baseline and event windows -- with 167 confirmed events and
+~460 companies, that's 150,000+ individual network requests. This
+crashed with httpx.RemoteProtocolError (ConnectionTerminated,
+last_stream_id:19999) after processing only 24 of 167 events. Same bug
+class as two other N+1 fixes made earlier tonight
+(build_ripple_timeline.py, multi_feature_model.py's sentiment lookup).
 
-Method: for each company with real GDELT coverage, compare its average
-tone in the event window (event_date through +7 days) against its own
-trailing 30-day baseline (ending the day before the window starts).
-A meaningfully negative deviation is real, evidence-based exposure.
+FIX: fetch the company list once, and bulk-load ALL of
+company_sentiment_timeline once into memory (paginated), then do every
+event's baseline/window tone averaging and stdev calculation as pure
+in-memory lookups. Zero change to the actual math -- same baseline
+window (30 days trailing, ending the day before the event window),
+same event window (event_date through +7 days), same z-score formula.
 
-Only works for companies with real company_sentiment_timeline coverage
-in both windows -- as of this session that's the 15 originally-covered
-companies, growing to 199 as the backfill (still running) completes.
+Also added: skips events that already have real rows in
+global_event_exposure (the 24 that survived the original crash), so a
+rerun doesn't waste time/API calls recomputing them -- same idempotent-
+resume discipline used elsewhere in this project tonight.
 
-Usage:
+Usage: identical to the original.
     python check_event_exposure.py <global_event_id>
     python check_event_exposure.py --all-confirmed
+    python check_event_exposure.py --all-confirmed --live
+    python check_event_exposure.py --manual-date <YYYY-MM-DD>
 """
 
 import os
 import sys
 from datetime import date, timedelta
+from collections import defaultdict
 from supabase import create_client
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
@@ -33,7 +42,7 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 EVENT_WINDOW_DAYS = 7
 BASELINE_WINDOW_DAYS = 30
-MIN_DAYS_FOR_BASELINE = 10  # need at least this many real days of coverage to trust a baseline
+MIN_DAYS_FOR_BASELINE = 10
 
 
 def get_all_companies() -> list[dict]:
@@ -53,34 +62,33 @@ def get_all_companies() -> list[dict]:
     return rows
 
 
-def get_tone_avg(entity_id: str, start_date: str, end_date: str) -> tuple[float | None, int]:
-    rows = supabase.table("company_sentiment_timeline") \
-        .select("avg_tone") \
-        .eq("entity_id", entity_id) \
-        .gte("date", start_date) \
-        .lte("date", end_date) \
-        .execute().data
-    tones = [r["avg_tone"] for r in rows if r["avg_tone"] is not None]
-    if not tones:
-        return None, 0
-    return sum(tones) / len(tones), len(tones)
+def get_all_sentiment_in_range(min_date: str, max_date: str) -> dict[str, list[tuple[str, float]]]:
+    """REAL FIX: one bulk fetch covering every event's real date range at
+    once, instead of one live query per (entity, event) pair. Returns
+    {entity_id: [(date, avg_tone), ...]} for fast in-memory lookups."""
+    by_entity: dict[str, list[tuple[str, float]]] = defaultdict(list)
+    offset = 0
+    page_size = 1000
+    while True:
+        page = supabase.table("company_sentiment_timeline") \
+            .select("entity_id,date,avg_tone") \
+            .gte("date", min_date).lte("date", max_date) \
+            .range(offset, offset + page_size - 1).execute().data
+        if not page:
+            break
+        for r in page:
+            if r["avg_tone"] is not None:
+                by_entity[r["entity_id"]].append((r["date"], r["avg_tone"]))
+        if len(page) < page_size:
+            break
+        offset += page_size
+    return by_entity
 
 
-def get_tone_avg_and_stdev(entity_id: str, start_date: str, end_date: str) -> tuple[float | None, float | None, int]:
-    """Same as get_tone_avg but also returns the company's OWN tone
-    volatility (stdev) over the window -- real fix found tonight: a raw
-    deviation number alone can't tell a genuine spike apart from a
-    company's normal week-to-week noise (same lesson as the earlier
-    flat-ratio spike-detection bug). Comparing the event-window deviation
-    against THIS company's own baseline stdev, as a z-score, is the
-    honest fix."""
-    rows = supabase.table("company_sentiment_timeline") \
-        .select("avg_tone") \
-        .eq("entity_id", entity_id) \
-        .gte("date", start_date) \
-        .lte("date", end_date) \
-        .execute().data
-    tones = [r["avg_tone"] for r in rows if r["avg_tone"] is not None]
+def tone_stats_in_window(entity_tones: list[tuple[str, float]], start: str, end: str) -> tuple[float | None, float | None, int]:
+    """Same math as the original get_tone_avg_and_stdev -- pure in-memory
+    now instead of a live query."""
+    tones = [t for d, t in entity_tones if start <= d <= end]
     if not tones:
         return None, None, 0
     mean = sum(tones) / len(tones)
@@ -89,23 +97,41 @@ def get_tone_avg_and_stdev(entity_id: str, start_date: str, end_date: str) -> tu
     return mean, stdev, len(tones)
 
 
-def check_event(event: dict, live: bool):
+def get_already_processed_event_ids() -> set[str]:
+    """Resume support: skip events that already have real rows in
+    global_event_exposure from the original run before it crashed."""
+    rows = []
+    offset = 0
+    while True:
+        page = supabase.table("global_event_exposure").select("global_event_id") \
+            .range(offset, offset + 999).execute().data
+        if not page:
+            break
+        rows.extend(page)
+        if len(page) < 1000:
+            break
+        offset += 1000
+    return {r["global_event_id"] for r in rows}
+
+
+def check_event(event: dict, live: bool, companies: list[dict],
+                 sentiment_by_entity: dict[str, list[tuple[str, float]]]):
     event_date = date.fromisoformat(str(event["event_date"])[:10])
     window_start = event_date
     window_end = event_date + timedelta(days=EVENT_WINDOW_DAYS)
     baseline_end = event_date - timedelta(days=1)
     baseline_start = event_date - timedelta(days=BASELINE_WINDOW_DAYS)
 
-    companies = get_all_companies()
     results = []
-
     for c in companies:
         entity_id = c["entity_id"]
-        baseline_tone, baseline_stdev, baseline_n = get_tone_avg_and_stdev(
-            entity_id, baseline_start.isoformat(), baseline_end.isoformat())
+        entity_tones = sentiment_by_entity.get(entity_id, [])
+        baseline_tone, baseline_stdev, baseline_n = tone_stats_in_window(
+            entity_tones, baseline_start.isoformat(), baseline_end.isoformat())
         if baseline_tone is None or baseline_n < MIN_DAYS_FOR_BASELINE:
             continue
-        window_tone, window_n = get_tone_avg(entity_id, window_start.isoformat(), window_end.isoformat())
+        window_tone, _, window_n = tone_stats_in_window(
+            entity_tones, window_start.isoformat(), window_end.isoformat())
         if window_tone is None:
             continue
 
@@ -135,8 +161,17 @@ def check_event(event: dict, live: bool):
               f"deviation={r['tone_deviation']:+.3f}  z={z_str}{flag}")
 
     if live:
-        for r in results:
-            supabase.table("global_event_exposure").upsert({
+        # REAL FIX (found after this exact same crash happened again): the
+        # read side was properly bulk-loaded, but the WRITE side still
+        # called .upsert() once per individual company result -- with 143
+        # events x up to ~460 companies, that's still tens of thousands of
+        # separate write requests, hitting the same HTTP/2 stream limit
+        # (last_stream_id:19999) all over again. Batching all of one
+        # event's results into ONE upsert call (Supabase accepts a list of
+        # records) drops this to one write request per event, not one per
+        # (event, company) pair.
+        if results:
+            rows_to_write = [{
                 "global_event_id": event["id"],
                 "entity_id": r["entity_id"],
                 "ticker": r["ticker"],
@@ -147,7 +182,10 @@ def check_event(event: dict, live: bool):
                 "tone_z_score": r["tone_z_score"],
                 "baseline_days": r["baseline_days"],
                 "event_window_days": r["event_window_days"],
-            }, on_conflict="global_event_id,entity_id").execute()
+            } for r in results]
+            supabase.table("global_event_exposure").upsert(
+                rows_to_write, on_conflict="global_event_id,entity_id"
+            ).execute()
         print(f"  Wrote {len(results)} exposure row(s) to global_event_exposure.")
 
 
@@ -162,13 +200,12 @@ def main():
 
     if args[0] == "--all-confirmed":
         events = supabase.table("global_events").select("*").eq("status", "confirmed").order("event_date").execute().data
+        already_done = get_already_processed_event_ids() if live else set()
+        if already_done:
+            before = len(events)
+            events = [e for e in events if e["id"] not in already_done]
+            print(f"Resuming: {before - len(events)} event(s) already have real exposure rows, skipping.")
     elif args[0] == "--manual-date":
-        # Real validation-test path, added tonight: run the exact same
-        # exposure mechanism against a known-answer historical date without
-        # needing a real discovered global_events row (e.g. COVID crash,
-        # March 2020 -- not found via our theme-based discovery since the
-        # Public Health category was never verified, but a genuine known
-        # case worth testing the mechanism against).
         manual_date = args[1]
         events = [{
             "id": "manual-test",
@@ -179,9 +216,26 @@ def main():
     else:
         events = supabase.table("global_events").select("*").eq("id", args[0]).execute().data
 
+    if not events:
+        print("Nothing to process.")
+        return
+
     print(f"Checking exposure for {len(events)} event(s){' (LIVE writes)' if live else ' (dry run)'}...")
+
+    # REAL FIX: fetch companies ONCE, and bulk-load sentiment data ONCE
+    # covering every event's real date range, instead of per-event/
+    # per-entity live queries.
+    companies = get_all_companies()
+    dates = [date.fromisoformat(str(e["event_date"])[:10]) for e in events]
+    min_date = (min(dates) - timedelta(days=BASELINE_WINDOW_DAYS)).isoformat()
+    max_date = (max(dates) + timedelta(days=EVENT_WINDOW_DAYS)).isoformat()
+    print(f"Bulk-loading sentiment data for {len(companies)} companies, {min_date} to {max_date}...")
+    sentiment_by_entity = get_all_sentiment_in_range(min_date, max_date)
+    print(f"Loaded {sum(len(v) for v in sentiment_by_entity.values())} real sentiment rows across "
+          f"{len(sentiment_by_entity)} companies with any coverage.\n")
+
     for event in events:
-        check_event(event, live)
+        check_event(event, live, companies, sentiment_by_entity)
 
 
 if __name__ == "__main__":
