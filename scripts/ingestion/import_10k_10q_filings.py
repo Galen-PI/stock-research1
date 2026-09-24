@@ -170,7 +170,7 @@ def get_companies_from_db(ticker_filter: list[str] = None):
     list that could drift out of sync with the real one."""
     import importlib.util
     spec = importlib.util.spec_from_file_location(
-        "ingest_sec_financials_multi", "scripts/ingest_sec_financials_multi.py"
+        "ingest_sec_financials_multi", "scripts/ingestion/ingest_sec_financials_multi.py"
     )
     ingest_module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(ingest_module)

@@ -21,7 +21,7 @@ import importlib.util
 # Import the real ingest_sec_financials_multi.py module directly so we
 # reuse its exact, already-correct logic rather than duplicating it.
 spec = importlib.util.spec_from_file_location(
-    "ingest_sec_financials_multi", "scripts/ingest_sec_financials_multi.py"
+    "ingest_sec_financials_multi", "scripts/ingestion/ingest_sec_financials_multi.py"
 )
 ingest_module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(ingest_module)

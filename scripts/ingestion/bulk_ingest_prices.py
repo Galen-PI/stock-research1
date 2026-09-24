@@ -33,7 +33,7 @@ import time
 import importlib.util
 
 spec = importlib.util.spec_from_file_location(
-    "ingest_market_prices", "scripts/ingest_market_prices.py"
+    "ingest_market_prices", "scripts/ingestion/ingest_market_prices.py"
 )
 prices_module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(prices_module)

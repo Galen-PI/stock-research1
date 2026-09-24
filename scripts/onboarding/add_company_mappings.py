@@ -28,7 +28,7 @@ def zero_pad_cik(cik: str) -> str:
 
 
 def add_to_financials_script(ticker: str, cik: str):
-    path = "scripts/ingest_sec_financials_multi.py"
+    path = "scripts/ingestion/ingest_sec_financials_multi.py"
     with open(path, "r") as f:
         content = f.read()
 
@@ -69,7 +69,7 @@ def add_to_financials_script(ticker: str, cik: str):
 
 
 def add_to_8k_script(ticker: str, cik: str, security_id: str):
-    path = "scripts/import_8k_filings.py"
+    path = "scripts/ingestion/import_8k_filings.py"
     with open(path, "r") as f:
         content = f.read()
 
@@ -96,7 +96,7 @@ def add_to_8k_script(ticker: str, cik: str, security_id: str):
 
 def verify(ticker: str):
     print(f"\n--- Verification ---")
-    for path in ["scripts/ingest_sec_financials_multi.py", "scripts/import_8k_filings.py"]:
+    for path in ["scripts/ingestion/ingest_sec_financials_multi.py", "scripts/ingestion/import_8k_filings.py"]:
         with open(path, "r") as f:
             content = f.read()
         found = f'"{ticker}"' in content

@@ -29,8 +29,8 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 SEC_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 SEC_HEADERS = {"User-Agent": "Stock Research Project contact@example.com"}
 
-FINANCIALS_PATH = "scripts/ingest_sec_financials_multi.py"
-EIGHTK_PATH = "scripts/import_8k_filings.py"
+FINANCIALS_PATH = "scripts/ingestion/ingest_sec_financials_multi.py"
+EIGHTK_PATH = "scripts/ingestion/import_8k_filings.py"
 
 
 def load_sec_mapping() -> dict:

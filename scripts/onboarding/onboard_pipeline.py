@@ -151,7 +151,7 @@ def main():
         log_step(run_id, "lookup_cik", "success", f"CIK {cik}", f"CIK={cik}")
 
     # --- Step 2: wire into mapping scripts ---
-    ok, output = run_script(["scripts/add_company_mappings.py", ticker, cik, entity_id, security_id])
+    ok, output = run_script(["scripts/onboarding/add_company_mappings.py", ticker, cik, entity_id, security_id])
     log_step(run_id, "add_mappings", "success" if ok else "failed", output, "")
     if not ok:
         finish_run(run_id, "failed")

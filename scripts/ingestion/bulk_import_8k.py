@@ -23,7 +23,7 @@ import time
 import importlib.util
 
 spec = importlib.util.spec_from_file_location(
-    "import_8k_filings", "scripts/import_8k_filings.py"
+    "import_8k_filings", "scripts/ingestion/import_8k_filings.py"
 )
 eightk_module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(eightk_module)

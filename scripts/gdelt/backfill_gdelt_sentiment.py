@@ -245,6 +245,9 @@ TRACKED_COMPANIES = {
 }
 
 
+from tracked_companies_extension import TRACKED_COMPANIES_EXTENSION
+TRACKED_COMPANIES.update(TRACKED_COMPANIES_EXTENSION)
+
 def month_range_to_dates(start_month: str, end_month: str):
     start = datetime.strptime(start_month, "%Y-%m")
     end = datetime.strptime(end_month, "%Y-%m")

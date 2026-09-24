@@ -27,4 +27,4 @@ jobs:
           MARKETAUX_API_KEY: ${{ secrets.MARKETAUX_API_KEY }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-        run: python scripts/ingest_marketaux_news.py
+        run: python scripts/ingestion/ingest_marketaux_news.py
