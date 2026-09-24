@@ -20,10 +20,24 @@ tag_reaction_character.py already scores). Extending to full sector
 peers (the "waves ripple through the whole sector" part of the design)
 is a deliberate later step, not this script.
 
+REAL FIX (2026-09-24): found during the storm/compounding investigation
+that this script had NEVER excluded bundled-summary events (rows in
+event_component_dates -- a multi-year narrative "summary" event that
+shares its stored event_date with one of the real, granular events it
+summarizes, same known pattern multi_feature_model.py already guards
+against via --exclude-bundled). Confirmed scope directly before fixing:
+171,469 of 441,452 total rows (38.9%) in event_ripple_timeline belonged
+to these bundled-summary events -- a structural contamination, not an
+edge case. Those existing bad rows were already deleted live. This
+script now excludes bundled events BY DEFAULT (opt back in with
+--include-bundled only if ever genuinely needed) so the contamination
+doesn't silently return the next time this runs --live on new events.
+
 Usage:
     python build_ripple_timeline.py --test 10       # first 10 events only, dry run
     python build_ripple_timeline.py --test 10 --live
-    python build_ripple_timeline.py --live           # all events
+    python build_ripple_timeline.py --live           # all events, bundled excluded by default
+    python build_ripple_timeline.py --live --include-bundled  # old behavior, not recommended
 """
 
 import os
@@ -106,24 +120,55 @@ def get_prices(ticker: str, start_date: str, end_date: str) -> list[dict]:
     return rows
 
 
-def get_events(limit: int | None) -> list[dict]:
-    if limit:
-        return supabase.table("events").select("id,title,event_date") \
-            .order("event_date").limit(limit).execute().data
-
-    events = []
+def get_bundled_event_ids() -> set[str]:
+    """REAL FIX (2026-09-24): real, distinct event_ids present in
+    event_component_dates -- these are multi-year "bundle summary" rows,
+    not granular real events, and must never get their own independent
+    ripple measurement (see module docstring for the real 38.9%
+    contamination this caused before being caught and fixed)."""
+    rows = []
     offset = 0
     page_size = 1000
     while True:
-        page = supabase.table("events").select("id,title,event_date") \
-            .order("event_date") \
+        page = supabase.table("event_component_dates").select("event_id") \
             .range(offset, offset + page_size - 1).execute().data
         if not page:
             break
-        events.extend(page)
+        rows.extend(page)
         if len(page) < page_size:
             break
         offset += page_size
+    return {r["event_id"] for r in rows}
+
+
+def get_events(limit: int | None, exclude_bundled: bool) -> list[dict]:
+    if limit:
+        events = supabase.table("events").select("id,title,event_date") \
+            .order("event_date").limit(limit * 2 if exclude_bundled else limit).execute().data
+    else:
+        events = []
+        offset = 0
+        page_size = 1000
+        while True:
+            page = supabase.table("events").select("id,title,event_date") \
+                .order("event_date") \
+                .range(offset, offset + page_size - 1).execute().data
+            if not page:
+                break
+            events.extend(page)
+            if len(page) < page_size:
+                break
+            offset += page_size
+
+    if exclude_bundled:
+        bundled_ids = get_bundled_event_ids()
+        before = len(events)
+        events = [e for e in events if e["id"] not in bundled_ids]
+        print(f"  Excluding {before - len(events)} known-bundled summary event(s) "
+              f"(see REAL FIX note in module docstring).")
+        if limit:
+            events = events[:limit]
+
     return events
 
 
@@ -237,11 +282,17 @@ def get_completed_event_ids() -> set[str]:
 def main():
     args = sys.argv[1:]
     live = "--live" in args
+    exclude_bundled = "--include-bundled" not in args  # REAL FIX: exclude by default now
     limit = None
     if "--test" in args:
         limit = int(args[args.index("--test") + 1])
 
-    events = get_events(limit)
+    if not exclude_bundled:
+        print("  WARNING: --include-bundled set. This reproduces the real 38.9%-of-table "
+              "contamination found and fixed 2026-09-24. Only use this if you genuinely "
+              "know what you're doing.")
+
+    events = get_events(limit, exclude_bundled)
 
     if live:
         completed_ids = get_completed_event_ids()

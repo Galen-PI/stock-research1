@@ -21,6 +21,16 @@ running the FULL remaining backlog (48,283 filings across 321 unstarted +
    immediately, then polls all of them together -- so total wall-clock
    time is close to the slowest single batch, not the sum of all of them.
 
+REAL FIX (2026-09-24): added a --limit N flag. This script has NO resume
+logic within a single run -- the fetch phase (fetch_all_filing_texts_concurrently)
+must fully complete for ALL requested candidates before anything is
+submitted to Anthropic or written to the database (confirmed, logged as
+a real, scoped future improvement: chunk the whole pipeline into
+fetch-submit-write batches). Until that real fix is built, a run that
+gets killed mid-fetch loses 100% of its progress, however far it got.
+--limit lets a run be sized to actually finish within a real, available
+time window instead.
+
 Prompt caching: KNOWN_ROUTINE_PATTERNS was expanded (real calibration
 notes and worked examples, not padding) to ~4,338 tokens, clearing Haiku
 4.5's 4,096-token cache minimum with real margin -- confirmed via the
@@ -35,6 +45,7 @@ Usage:
     python classify_8k_filings_batch_v2.py ALL              # full remaining backlog
     python classify_8k_filings_batch_v2.py TICKER            # single company
     python classify_8k_filings_batch_v2.py TICKER TICKER ... # multiple companies in one run
+    python classify_8k_filings_batch_v2.py ALL --limit 2500  # first 2500 unclassified candidates only
 """
 
 import os
@@ -452,12 +463,6 @@ def fetch_one_candidate(c: dict) -> tuple[dict, str | None, str | None]:
                 continue
             return c, None, str(e)
         except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
-            # Real gap found tonight: timeouts and connection errors were
-            # hard-failing on the first hit with zero retries, silently
-            # dropping filings from the batch (SEC EDGAR's own servers are
-            # frequently slow/flaky under sustained concurrent load, so
-            # this was a real, meaningful loss, not a rare edge case).
-            # Retry with the same backoff as a 429 instead of giving up.
             wait = min(60, 2 ** attempt)
             time.sleep(wait)
             continue
@@ -584,10 +589,6 @@ def compute_flag(ai_result: dict, random_audit_hit: bool) -> tuple[bool, str]:
 
 
 def estimate_tokens_for_requests(all_requests: list[dict]) -> dict:
-    """Rough pre-flight token estimate using the standard ~4 chars/token
-    heuristic for English text. This is an ESTIMATE, not exact -- actual
-    tokenization varies, but it's close enough to catch a runaway request
-    count or a wildly wrong filing_text length before spending real money."""
     total_system_chars = 0
     total_user_chars = 0
     for req in all_requests:
@@ -599,12 +600,6 @@ def estimate_tokens_for_requests(all_requests: list[dict]) -> dict:
 
     total_input_chars = total_system_chars + total_user_chars
     est_input_tokens = total_input_chars / 4
-    # max_tokens is a ceiling, not a guarantee of actual output length.
-    # 250 tok/filing came from a small 102-filing synchronous test and
-    # proved too low at real production scale -- the actual 49,656-filing
-    # batch run (2026-09-16) averaged 327 tokens/filing on real Anthropic
-    # usage-dashboard numbers (16,250,925 output tokens / 49,656 filings).
-    # Using the real, larger-scale figure going forward.
     est_output_tokens_per_request = 327
     est_output_tokens = len(all_requests) * est_output_tokens_per_request
 
@@ -620,23 +615,10 @@ def print_preflight_estimate(estimate: dict) -> float:
     est_input = estimate["est_input_tokens"]
     est_output = estimate["est_output_tokens"]
 
-    # KNOWN_ROUTINE_PATTERNS now exceeds Haiku 4.5's 4,096-token cache
-    # minimum (verified via the real count_tokens endpoint), so the
-    # static portion of the system prompt is cache-eligible. Batch API
-    # cache pricing: writes cost +25% over base once per 5-minute cache
-    # window, cached reads cost -90% off base. The per-filing dynamic
-    # content (filing text, recent-events list) is never cached and is
-    # priced at the normal 50%-off batch rate.
-    STATIC_PROMPT_TOKENS = 4338  # KNOWN_ROUTINE_PATTERNS + instructions, re-verify if edited
+    STATIC_PROMPT_TOKENS = 4338
     dynamic_input_per_request = max(0, (est_input / max(num_requests, 1)) - STATIC_PROMPT_TOKENS)
     dynamic_input_total = dynamic_input_per_request * num_requests
 
-    # Real observed cache-read ratio from the actual 49,656-filing production
-    # run (2026-09-16, Anthropic usage dashboard): 57.1%, not the ~99% a
-    # single-write-then-all-reads model assumes. A long, multi-job Batch API
-    # run outlives Anthropic's ~5-minute cache window repeatedly, so the
-    # cache gets rewritten (25% markup) far more often than the idealized
-    # case. Modeling against the real ratio instead of assuming best-case.
     REAL_OBSERVED_CACHE_READ_RATIO = 0.571
     static_prompt_total_tokens = STATIC_PROMPT_TOKENS * num_requests
     static_read_tokens = static_prompt_total_tokens * REAL_OBSERVED_CACHE_READ_RATIO
@@ -663,7 +645,6 @@ def print_preflight_estimate(estimate: dict) -> float:
     print(f"  TOTAL:  ${est_total_cost:,.2f}")
     print("=" * 70)
     return est_total_cost
-
 
 
 def chunk_list(items: list, size: int) -> list[list]:
@@ -764,13 +745,26 @@ def print_real_cost_report(usage_totals: dict, num_requests: int):
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python classify_8k_filings_batch_v2.py <TICKER [TICKER ...]|ALL>")
+        print("Usage: python classify_8k_filings_batch_v2.py <TICKER [TICKER ...]|ALL> [--limit N]")
         sys.exit(1)
-    ticker_args = [a for a in sys.argv[1:] if a != "--yes"]
+
+    # REAL FIX (2026-09-24): --limit N, parsed cleanly out of the ticker
+    # args list so it never gets treated as a ticker symbol itself.
+    raw_args = sys.argv[1:]
+    limit = None
+    if "--limit" in raw_args:
+        idx = raw_args.index("--limit")
+        limit = int(raw_args[idx + 1])
+        raw_args = raw_args[:idx] + raw_args[idx + 2:]
+    ticker_args = [a for a in raw_args if a != "--yes"]
 
     candidates = get_unclassified_candidates(ticker_args)
     print(f"Found {len(candidates)} unclassified candidates across "
           f"{len(set(c['ticker'] for c in candidates))} companies.")
+
+    if limit is not None and len(candidates) > limit:
+        candidates = candidates[:limit]
+        print(f"  --limit {limit} set: processing only the first {limit} of them this run.")
 
     if not candidates:
         return
@@ -797,7 +791,6 @@ def main():
         all_requests.append(req)
         candidate_by_id[custom_id] = c
 
-    # Pre-flight estimate: show real projected cost BEFORE anything is sent.
     estimate = estimate_tokens_for_requests(all_requests)
     print_preflight_estimate(estimate)
 
