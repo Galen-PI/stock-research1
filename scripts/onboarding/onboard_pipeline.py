@@ -8,6 +8,19 @@ zero context on the project (e.g. run once, walk away) -- every
 problem gets written to onboarding_runs / onboarding_run_steps rather
 than requiring the operator to interpret terminal output.
 
+REAL FIX (2026-09-25): found while preparing to test this script for
+real (issue #6) -- 6 of 7 subprocess calls referenced STALE,
+pre-reorganization paths (e.g. "scripts/classify_8k_filings_batch_v2.py"
+instead of the real, current "scripts/classification/classify_8k_filings_batch_v2.py").
+This would have crashed the pipeline at step 3 (financials), the first
+call after entity registration -- confirmed via a real `find` across the
+actual committed file tree before running anything live, same discipline
+already applied to the Marketaux GitHub Actions workflow earlier today
+(same real bug class: the scripts/ subfolder reorganization broke
+hardcoded paths in multiple places, and this was one more that had
+never actually been caught). Only add_company_mappings.py already had
+its correct path. All 6 stale references fixed below.
+
 Chain (each step reuses an existing, already-tested script):
     1. bulk_onboard_step1_2.py  -- register entity + security
     2. add_company_mappings.py  -- wire into financials/8-K scripts
@@ -29,7 +42,7 @@ on bad data. Check unreviewed problems anytime with:
     ORDER BY r.started_at DESC, s.started_at;
 
 Usage:
-    python scripts/onboard_pipeline.py TICKER
+    python scripts/onboarding/onboard_pipeline.py TICKER
 """
 
 import os
@@ -113,7 +126,7 @@ def count_rows(table: str, security_id: str = None, ticker: str = None) -> int:
 
 def main():
     if len(sys.argv) not in (2, 3):
-        print("Usage: python scripts/onboard_pipeline.py TICKER [MANUAL_CIK]")
+        print("Usage: python scripts/onboarding/onboard_pipeline.py TICKER [MANUAL_CIK]")
         print("  MANUAL_CIK: optional -- supply this when the ticker is not in SEC's")
         print("  company_tickers.json (confirmed real gap for AVB, EA, EQR -- found via")
         print("  direct EDGAR name search instead). Never guess a CIK; only pass one")
@@ -128,7 +141,7 @@ def main():
     overall_status = "completed"
 
     # --- Step 1: register entity + security ---
-    ok, output = run_script(["scripts/bulk_onboard_step1_2.py", ticker])
+    ok, output = run_script(["scripts/onboarding/bulk_onboard_step1_2.py", ticker])
     entity_id, security_id = get_entity_and_security(ticker)
     if not ok or not entity_id or not security_id:
         log_step(run_id, "register_entity", "failed", output,
@@ -158,7 +171,7 @@ def main():
         return
 
     # --- Step 3: financials ---
-    ok, output = run_script(["scripts/bulk_ingest_financials.py", ticker])
+    ok, output = run_script(["scripts/ingestion/bulk_ingest_financials.py", ticker])
     fin_count = count_rows("financial_statements", security_id=security_id)
     status = "success" if fin_count > 0 else "warning"
     log_step(run_id, "ingest_financials", status, output, f"financial_statements rows: {fin_count}")
@@ -166,7 +179,7 @@ def main():
         overall_status = "flagged"
 
     # --- Step 4: 8-K history ---
-    ok, output = run_script(["scripts/bulk_import_8k.py", ticker])
+    ok, output = run_script(["scripts/ingestion/bulk_import_8k.py", ticker])
     filing_count = count_rows("sec_8k_filings", security_id=security_id)
     status = "success" if filing_count > 0 else "warning"
     log_step(run_id, "import_8k_history", status, output, f"sec_8k_filings rows: {filing_count}")
@@ -178,7 +191,7 @@ def main():
         return
 
     # --- Step 5: prices ---
-    ok, output = run_script(["scripts/bulk_ingest_prices.py", ticker])
+    ok, output = run_script(["scripts/ingestion/bulk_ingest_prices.py", ticker])
     price_count = count_rows("market_prices", security_id=security_id)
     status = "success" if price_count > 0 else "warning"
     log_step(run_id, "ingest_prices", status, output, f"market_prices rows: {price_count}")
@@ -186,7 +199,7 @@ def main():
         overall_status = "flagged"
 
     # --- Step 6: classify ---
-    ok, output = run_script(["scripts/classify_8k_filings_batch_v2.py", ticker, "--yes"])
+    ok, output = run_script(["scripts/classification/classify_8k_filings_batch_v2.py", ticker, "--yes"])
     classified_count = count_rows("filing_ai_classifications", ticker=ticker)
     status = "success" if classified_count > 0 else "warning"
     log_step(run_id, "classify", status, output,
@@ -222,7 +235,7 @@ def main():
         overall_status = "flagged"
 
     # --- Step 8: promote confirmed real_events into events ---
-    ok, output = run_script(["scripts/promote_events.py", "--live", "--ticker", ticker])
+    ok, output = run_script(["scripts/classification/promote_events.py", "--live", "--ticker", ticker])
     event_count = supabase.table("event_source_filings").select("*", count="exact") \
         .eq("ticker", ticker).limit(1).execute().count or 0
     status = "success" if ok else "warning"

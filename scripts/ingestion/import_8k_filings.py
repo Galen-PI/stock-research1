@@ -18,6 +18,8 @@ supabase_headers = {
 
 # Same four companies already tracked elsewhere in the project.
 COMPANIES = [
+    {"ticker": "ADBE", "cik": "0000796343", "security_id": "7976a637-e0a3-4716-adb2-73e16a0ba08f"},
+    {"ticker": "MA", "cik": "0001141391", "security_id": "b0147bb8-e049-4ee1-8927-cbdb79657f51"},
     {"ticker": "VMRK", "cik": "0000906107", "security_id": "bbe92f38-0db0-440f-8753-749ef2f23449"},
     {"ticker": "EA", "cik": "0000712515", "security_id": "13277c91-2741-494d-afc1-dd0df696385b"},
     {"ticker": "AVB", "cik": "0000915912", "security_id": "9ef32e73-f13e-488e-a262-b387a2ef549e"},
@@ -546,12 +548,20 @@ def parse_8k_block(block, seen_accessions, security_id, cik):
 
         accession_no_dashes = accession.replace("-", "")
         cik_no_padding = str(int(cik))
-        doc_url = None
-        if primary_doc:
-            doc_url = (
-                f"https://www.sec.gov/Archives/edgar/data/"
-                f"{cik_no_padding}/{accession_no_dashes}/{primary_doc}"
-            )
+        # REAL FIX (2026-09-25): previously built the URL from SEC's own
+        # "primaryDocument" API field. Confirmed via real, live fetch
+        # tests that SEC's own value is frequently a generic, stale
+        # "0001.txt" placeholder for older filings that predates
+        # distinctly-named documents -- and that placeholder often 404s.
+        # Real, always-correct fix: use SEC's universal "complete
+        # submission text file" URL instead, which exists for every real
+        # filing regardless of what primaryDocument says. Verified this
+        # pattern directly against multiple real, live 1990s-2020s
+        # filings before switching to it unconditionally.
+        doc_url = (
+            f"https://www.sec.gov/Archives/edgar/data/"
+            f"{cik_no_padding}/{accession_no_dashes}/{accession}.txt"
+        )
 
         filings.append({
             "security_id": security_id,

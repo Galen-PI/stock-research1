@@ -33,6 +33,14 @@ script now excludes bundled events BY DEFAULT (opt back in with
 --include-bundled only if ever genuinely needed) so the contamination
 doesn't silently return the next time this runs --live on new events.
 
+REAL FIX (2026-09-25): the crash this script kept hitting
+(RemoteProtocolError, always at last_stream_id near 19999-20000) is a
+genuine HTTP/2 connection stream cap, confirmed by it firing at the same
+real stream count every time -- not random bad luck. Added: (1) periodic
+proactive client refresh well before that real limit, (2) real retry-
+with-reconnect around each write instead of crashing the whole run on
+one connection hiccup. No longer needs babysitting/manual reruns.
+
 Usage:
     python build_ripple_timeline.py --test 10       # first 10 events only, dry run
     python build_ripple_timeline.py --test 10 --live
@@ -42,12 +50,53 @@ Usage:
 
 import os
 import sys
+import time
 from datetime import timedelta, date
 from supabase import create_client
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_KEY"]
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+
+def make_client():
+    return create_client(SUPABASE_URL, SUPABASE_KEY)
+
+
+supabase = make_client()
+
+# REAL FIX (2026-09-25): proactively recreate the client well before the
+# real HTTP/2 stream cap, instead of waiting to crash.
+_REQUEST_COUNT = 0
+_CLIENT_REFRESH_EVERY = 5000
+_WRITE_MAX_RETRIES = 5
+
+
+def real_write_with_retry(row: dict):
+    """Real, resilient replacement for a bare .upsert().execute() call --
+    retries on transient connection errors (reconnecting with a fresh
+    client first, since the known failure is connection-level, not
+    request-level) instead of crashing the whole run over one bad write."""
+    global supabase, _REQUEST_COUNT
+    _REQUEST_COUNT += 1
+    if _REQUEST_COUNT % _CLIENT_REFRESH_EVERY == 0:
+        supabase = make_client()
+
+    for attempt in range(_WRITE_MAX_RETRIES):
+        try:
+            supabase.table("event_ripple_timeline").upsert(
+                row, on_conflict="event_id,entity_id,day_offset"
+            ).execute()
+            return
+        except Exception as e:
+            wait = min(30, 2 ** attempt)
+            print(f"    Real transient write error (attempt {attempt + 1}/"
+                  f"{_WRITE_MAX_RETRIES}): {type(e).__name__}. "
+                  f"Reconnecting and retrying in {wait}s...")
+            supabase = make_client()
+            time.sleep(wait)
+    raise RuntimeError(f"Real write failed after {_WRITE_MAX_RETRIES} retries "
+                        f"even with reconnects -- likely a real, non-transient problem.")
+
 
 DAYS_BEFORE = 5   # trading-day offsets from -5
 DAYS_AFTER = 40   # through +40 -- wide enough to see a shock stabilize
@@ -252,18 +301,14 @@ def build_for_event(event: dict, entity_id: str, live: bool) -> int:
 
     if live and rows_to_write:
         for row in rows_to_write:
-            supabase.table("event_ripple_timeline").upsert(
-                row, on_conflict="event_id,entity_id,day_offset"
-            ).execute()
+            real_write_with_retry(row)
 
     return len(rows_to_write)
 
 
 def get_completed_event_ids() -> set[str]:
-    """Real resume logic: the full --live run has no way to survive an
-    HTTP/2 connection drop (hit at ~20,000 requests on one run) without
-    this -- upserts are per-row, so anything already written is safe to
-    skip rather than reprocessed on a rerun."""
+    """Real resume logic: anything already written is safe to skip rather
+    than reprocessed on a rerun."""
     completed = set()
     offset = 0
     page_size = 1000
@@ -311,8 +356,9 @@ def main():
     total_rows = 0
     skipped_no_entities = 0
     skipped_insufficient_data = 0
+    total_events = len(events)
 
-    for event in events:
+    for event_num, event in enumerate(events, start=1):
         entity_ids = entity_map.get(event["id"], [])
         if not entity_ids:
             skipped_no_entities += 1
@@ -324,6 +370,10 @@ def main():
                 skipped_insufficient_data += 1
             else:
                 total_rows += n
+
+        if event_num % 100 == 0 or event_num == total_events:
+            print(f"  ...{event_num}/{total_events} events processed "
+                  f"({total_pairs} pairs, {total_rows} rows written so far)")
 
     print(f"\nEvent-entity pairs processed: {total_pairs}")
     print(f"Day-offset rows {'written' if live else 'that would be written'}: {total_rows}")

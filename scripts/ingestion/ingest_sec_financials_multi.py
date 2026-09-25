@@ -60,6 +60,11 @@ CONCEPTS = {
 
 
 CIK_TO_TICKER = {
+    "0000906107": "VMRK",
+    "0000712515": "EA",
+    "0000915912": "AVB",
+    "796343": "ADBE",
+    "1141391": "MA",
     "906107": "VMRK",
     "712515": "EA",
     "915912": "AVB",
@@ -561,6 +566,8 @@ CIK_TO_TICKER = {
 
 # Each ticker's fiscal year end, needed for correct quarter/Q4 derivation.
 FISCAL_YEAR_END = {
+    "ADBE": (12, 31),      # standard calendar year (default -- edit manually if non-standard)
+    "MA": (12, 31),      # standard calendar year (default -- edit manually if non-standard)
     "VMRK": (12, 31),      # standard calendar year (default -- edit manually if non-standard)
     "EA": (12, 31),      # standard calendar year (default -- edit manually if non-standard)
     "AVB": (12, 31),      # standard calendar year (default -- edit manually if non-standard)

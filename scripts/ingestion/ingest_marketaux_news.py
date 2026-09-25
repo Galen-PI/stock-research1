@@ -11,6 +11,15 @@ match_score is Marketaux's own relevance signal, and varies a lot even among
 mentioned tickers, so we store it explicitly rather than treating "ticker is
 mentioned" as equivalent to "article is about this company."
 
+REAL FIX (2026-09-25): the daily scheduled GitHub Actions run failed with a
+real, transient urllib3 ReadTimeoutError connecting to api.marketaux.com
+(30s timeout) on page 3 of 10 -- a genuine, one-off network hiccup, not a
+bug in this script. Confirmed the run otherwise worked correctly (pages 1-2
+succeeded, real articles stored) before hitting the timeout. Added a real
+retry-with-backoff around fetch_articles() (3 attempts, same pattern used
+elsewhere in this project for transient network failures) so one slow
+response doesn't kill the entire day's run.
+
 Requires:
     MARKETAUX_API_KEY  - free key from https://www.marketaux.com/
     SUPABASE_URL       - existing project secret
@@ -48,8 +57,14 @@ TRACKED_TICKERS = [
 # ticker, to conserve quota.
 TICKERS_PARAM = ",".join(TRACKED_TICKERS)
 
+FETCH_MAX_RETRIES = 3
+
 
 def fetch_articles(page: int = 1, limit: int = 50) -> dict:
+    """REAL FIX (2026-09-25): retry with backoff on transient network
+    failures (read timeouts, connection errors) -- a single slow response
+    from Marketaux previously killed the entire run partway through, even
+    though earlier pages had already succeeded."""
     params = {
         "api_token": MARKETAUX_API_KEY,
         "symbols": TICKERS_PARAM,
@@ -57,9 +72,19 @@ def fetch_articles(page: int = 1, limit: int = 50) -> dict:
         "limit": limit,
         "page": page,
     }
-    resp = requests.get(MARKETAUX_BASE_URL, params=params, timeout=30)
-    resp.raise_for_status()
-    return resp.json()
+    last_error = None
+    for attempt in range(FETCH_MAX_RETRIES):
+        try:
+            resp = requests.get(MARKETAUX_BASE_URL, params=params, timeout=30)
+            resp.raise_for_status()
+            return resp.json()
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+            last_error = e
+            wait = 2 ** attempt  # 1s, 2s, 4s
+            print(f"  Real transient network error on page {page}, "
+                  f"attempt {attempt + 1}/{FETCH_MAX_RETRIES}: {e}. Retrying in {wait}s...")
+            time.sleep(wait)
+    raise last_error
 
 
 def upsert_article(article: dict):

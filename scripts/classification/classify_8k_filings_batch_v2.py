@@ -664,6 +664,32 @@ def submit_batch(requests_list: list[dict]) -> str:
     return batch_id
 
 
+POLL_MAX_RETRIES = 5
+
+
+def poll_one_batch_with_retry(batch_id: str) -> dict:
+    """REAL FIX (2026-09-25): a single transient error (e.g. a real
+    503 from Anthropic's own API) previously crashed the ENTIRE
+    multi-hour polling loop, losing track of an already-submitted,
+    already-paid-for batch. Retries with backoff instead -- this is
+    polling a real batch's STATUS, not resubmitting it, so retrying
+    costs nothing extra and is always safe."""
+    for attempt in range(POLL_MAX_RETRIES):
+        try:
+            resp = requests.get(
+                f"https://api.anthropic.com/v1/messages/batches/{batch_id}",
+                headers=ANTHROPIC_HEADERS, timeout=30,
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except requests.exceptions.RequestException as e:
+            wait = min(60, 2 ** attempt)
+            print(f"  Real transient error polling {batch_id} (attempt {attempt + 1}/"
+                  f"{POLL_MAX_RETRIES}): {e}. Retrying in {wait}s...")
+            time.sleep(wait)
+    raise RuntimeError(f"Real poll failed for {batch_id} after {POLL_MAX_RETRIES} retries.")
+
+
 def poll_batches_until_all_done(batch_ids: list[str]) -> dict:
     pending = set(batch_ids)
     final_batches = {}
@@ -671,12 +697,7 @@ def poll_batches_until_all_done(batch_ids: list[str]) -> dict:
     print(f"\nPolling {len(pending)} batches together every {POLL_INTERVAL_SECONDS}s...")
     while pending:
         for batch_id in list(pending):
-            resp = requests.get(
-                f"https://api.anthropic.com/v1/messages/batches/{batch_id}",
-                headers=ANTHROPIC_HEADERS, timeout=30,
-            )
-            resp.raise_for_status()
-            batch = resp.json()
+            batch = poll_one_batch_with_retry(batch_id)
             if batch["processing_status"] == "ended":
                 final_batches[batch_id] = batch
                 pending.discard(batch_id)
@@ -743,40 +764,33 @@ def print_real_cost_report(usage_totals: dict, num_requests: int):
     print("=" * 70)
 
 
-def main():
-    if len(sys.argv) < 2:
-        print("Usage: python classify_8k_filings_batch_v2.py <TICKER [TICKER ...]|ALL> [--limit N]")
-        sys.exit(1)
+# REAL FIX (2026-09-25, issue #23): process candidates in real chunks --
+# fetch a chunk, submit that chunk's batch, write its results, move to
+# the next chunk -- instead of fetching and submitting the ENTIRE
+# requested set before anything gets written. A run killed mid-fetch
+# now only loses its current chunk's progress, not everything. Real,
+# observed average cost (from today's three real runs): ~$0.0028/filing
+# -- used for ONE honest upfront estimate before any chunk starts,
+# rather than requiring a confirmation per chunk (which would undo the
+# earlier --limit fix's goal of making this less tedious to run).
+REAL_OBSERVED_COST_PER_FILING = 0.0028
+CHUNK_SIZE = 2500
 
-    # REAL FIX (2026-09-24): --limit N, parsed cleanly out of the ticker
-    # args list so it never gets treated as a ticker symbol itself.
-    raw_args = sys.argv[1:]
-    limit = None
-    if "--limit" in raw_args:
-        idx = raw_args.index("--limit")
-        limit = int(raw_args[idx + 1])
-        raw_args = raw_args[:idx] + raw_args[idx + 2:]
-    ticker_args = [a for a in raw_args if a != "--yes"]
 
-    candidates = get_unclassified_candidates(ticker_args)
-    print(f"Found {len(candidates)} unclassified candidates across "
-          f"{len(set(c['ticker'] for c in candidates))} companies.")
+def process_one_chunk(chunk_candidates: list[dict]) -> tuple[int, int, int, dict]:
+    """Fetch, submit, poll, and WRITE one real chunk. Returns
+    (classified_count, flagged_count, fetch_errors, usage_totals) for
+    this chunk only -- called repeatedly by main(), each call's writes
+    already safely in the database before the next chunk starts."""
+    fetched, fetch_errors = fetch_all_filing_texts_concurrently(chunk_candidates)
+    print(f"  Fetched {len(fetched)} filing texts successfully ({fetch_errors} errors).")
 
-    if limit is not None and len(candidates) > limit:
-        candidates = candidates[:limit]
-        print(f"  --limit {limit} set: processing only the first {limit} of them this run.")
-
-    if not candidates:
-        return
-
-    fetched, fetch_errors = fetch_all_filing_texts_concurrently(candidates)
-    print(f"\nFetched {len(fetched)} filing texts successfully ({fetch_errors} errors).")
-
+    empty_usage = {"input_tokens": 0, "output_tokens": 0,
+                    "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}
     if not fetched:
-        print("Nothing to submit.")
-        return
+        print("  Nothing to submit in this chunk.")
+        return 0, 0, fetch_errors, empty_usage
 
-    print("\nBuilding batch requests...")
     recent_events_cache = {}
     all_requests = []
     candidate_by_id = {}
@@ -791,33 +805,17 @@ def main():
         all_requests.append(req)
         candidate_by_id[custom_id] = c
 
-    estimate = estimate_tokens_for_requests(all_requests)
-    print_preflight_estimate(estimate)
-
-    if "--yes" in sys.argv:
-        print("\n--yes flag set: skipping confirmation, proceeding with submission.")
-    else:
-        confirm = input("\nProceed with submission? [y/N]: ").strip().lower()
-        if confirm != "y":
-            print("Aborted -- nothing was sent to Anthropic. No cost incurred.")
-            return
-
     chunks = chunk_list(all_requests, MAX_BATCH_SIZE)
-    print(f"\nSubmitting {len(chunks)} batch job(s) (chunked at {MAX_BATCH_SIZE} requests each)...")
-    batch_ids = [submit_batch(chunk) for chunk in chunks]
-
+    print(f"  Submitting {len(chunks)} batch job(s) for this chunk...")
+    batch_ids = [submit_batch(c) for c in chunks]
     final_batches = poll_batches_until_all_done(batch_ids)
 
-    print("\nFetching and writing results from all batches...")
     all_results = {}
-    combined_usage = {
-        "input_tokens": 0, "output_tokens": 0,
-        "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0,
-    }
+    combined_usage = dict(empty_usage)
     for batch_id, batch in final_batches.items():
         results_url = batch.get("results_url")
         if not results_url:
-            print(f"  WARNING: batch {batch_id} has no results_url, skipping")
+            print(f"    WARNING: batch {batch_id} has no results_url, skipping")
             continue
         results, usage = fetch_batch_results(results_url)
         all_results.update(results)
@@ -855,12 +853,79 @@ def main():
         if flagged:
             flagged_count += 1
 
-    print_real_cost_report(combined_usage, classified_count)
+    print(f"  Chunk done: {classified_count} classified, {flagged_count} flagged.")
+    return classified_count, flagged_count, fetch_errors, combined_usage
 
-    print(f"\nClassified: {classified_count}")
-    print(f"Flagged for human review: {flagged_count}")
-    print(f"Auto-cleared: {classified_count - flagged_count}")
-    print(f"Fetch errors: {fetch_errors}")
+
+def main():
+    if len(sys.argv) < 2:
+        print("Usage: python classify_8k_filings_batch_v2.py <TICKER [TICKER ...]|ALL> [--limit N]")
+        sys.exit(1)
+
+    raw_args = sys.argv[1:]
+    limit = None
+    if "--limit" in raw_args:
+        idx = raw_args.index("--limit")
+        limit = int(raw_args[idx + 1])
+        raw_args = raw_args[:idx] + raw_args[idx + 2:]
+    ticker_args = [a for a in raw_args if a != "--yes"]
+
+    candidates = get_unclassified_candidates(ticker_args)
+    print(f"Found {len(candidates)} unclassified candidates across "
+          f"{len(set(c['ticker'] for c in candidates))} companies.")
+
+    if limit is not None and len(candidates) > limit:
+        candidates = candidates[:limit]
+        print(f"  --limit {limit} set: processing only the first {limit} of them this run.")
+
+    if not candidates:
+        return
+
+    est_cost = len(candidates) * REAL_OBSERVED_COST_PER_FILING
+    num_chunks = (len(candidates) + CHUNK_SIZE - 1) // CHUNK_SIZE
+    print(f"\nReal, honest ESTIMATE (based on today's actual observed rate, "
+          f"~${REAL_OBSERVED_COST_PER_FILING}/filing): ~${est_cost:,.2f} for "
+          f"{len(candidates)} candidates, in {num_chunks} chunk(s) of up to {CHUNK_SIZE}.")
+    print("This is ONE estimate covering the whole run -- results will be written "
+          "chunk by chunk as they complete, not all at the end.")
+
+    if "--yes" in sys.argv:
+        print("--yes flag set: skipping confirmation, proceeding.")
+    else:
+        confirm = input("\nProceed with the full chunked run? [y/N]: ").strip().lower()
+        if confirm != "y":
+            print("Aborted -- nothing was sent to Anthropic. No cost incurred.")
+            return
+
+    total_classified = 0
+    total_flagged = 0
+    total_fetch_errors = 0
+    total_usage = {"input_tokens": 0, "output_tokens": 0,
+                    "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}
+
+    for i in range(0, len(candidates), CHUNK_SIZE):
+        chunk = candidates[i:i + CHUNK_SIZE]
+        chunk_num = i // CHUNK_SIZE + 1
+        print(f"\n{'='*70}\nCHUNK {chunk_num}/{num_chunks} ({len(chunk)} candidates)\n{'='*70}")
+        classified, flagged, fetch_errors, usage = process_one_chunk(chunk)
+        total_classified += classified
+        total_flagged += flagged
+        total_fetch_errors += fetch_errors
+        for key in total_usage:
+            total_usage[key] += usage[key]
+        running_cost = (
+            total_usage["input_tokens"] / 1_000_000 * 1.00 * 0.5
+            + total_usage["cache_creation_input_tokens"] / 1_000_000 * 1.25 * 0.5
+            + total_usage["cache_read_input_tokens"] / 1_000_000 * 0.10 * 0.5
+            + total_usage["output_tokens"] / 1_000_000 * 5.00 * 0.5
+        )
+        print(f"  Running total: {total_classified} classified, ${running_cost:,.2f} real cost so far.")
+
+    print_real_cost_report(total_usage, total_classified)
+    print(f"\nGRAND TOTAL -- Classified: {total_classified}")
+    print(f"Flagged for human review: {total_flagged}")
+    print(f"Auto-cleared: {total_classified - total_flagged}")
+    print(f"Fetch errors: {total_fetch_errors}")
 
 
 if __name__ == "__main__":
