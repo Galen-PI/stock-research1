@@ -252,9 +252,24 @@ def build_dataset(exclude_bundled: bool = False):
                 skipped_missing_feature += 1
                 continue
 
+            # REAL NEW FEATURE (2026-09-25): storm_x_sentiment interaction term.
+            # Standalone walk-forward tests tonight found flat sentiment and
+            # flat storm_tier each independently null, but storm-condition +
+            # neutral-sentiment showed a real, convergent positive signal
+            # across all three trend sub-cells (best cell: +10.7pp vs
+            # baseline, n=61) -- a genuine interaction a model with these
+            # two features only ever encoded SEPARATELY could not represent.
+            # Collapses storm_tier to the same binary validated in that test
+            # (isolated vs any-storm) crossed with sentiment, since testing
+            # showed the binary collapse, not the 4-way tier, was where the
+            # real signal lived.
+            storm_binary = "isolated" if storm_tier == "isolated" else "storm"
+            storm_x_sentiment = f"{storm_binary}_{sentiment}"
+
             rows.append({
                 "event_date": event_date, "event_type": etype, "firm_state": firm_state,
-                "regime": regime, "sentiment": sentiment, "storm_tier": storm_tier, "reaction": reaction,
+                "regime": regime, "sentiment": sentiment, "storm_tier": storm_tier,
+                "storm_x_sentiment": storm_x_sentiment, "reaction": reaction,
             })
     print(f"  Skipped {skipped_missing_feature} events missing at least one real feature value "
           f"(no longer filled with a fake 'unknown'/'no_data' placeholder).")
@@ -296,7 +311,12 @@ def main():
               "database_fixes_and_review_backlog.md.")
         return
 
-    feature_cols = ["event_type", "firm_state", "regime", "sentiment", "storm_tier"]
+    # REAL NEW FEATURE (2026-09-25): added storm_x_sentiment alongside the
+    # existing sentiment and storm_tier features (not replacing them) --
+    # the honest comparison is whether adding this real interaction term
+    # improves on the just-established baseline (34.9% test accuracy,
+    # cutoff 2022-01-01), not whether it works in isolation.
+    feature_cols = ["event_type", "firm_state", "regime", "sentiment", "storm_tier", "storm_x_sentiment"]
     X_train_raw = [[r[c] for c in feature_cols] for r in train_rows]
     X_test_raw = [[r[c] for c in feature_cols] for r in test_rows]
     y_train = [r["reaction"] for r in train_rows]
